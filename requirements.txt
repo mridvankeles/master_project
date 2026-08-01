@@ -1,0 +1,64 @@
+# =============================================================================
+# Pinned dependencies. Every version is exact — no ranges, no `>=`.
+# Installed by conda into the `rsmoe` env (see environment.yml), or directly:
+#     pip install -r requirements.txt
+# =============================================================================
+
+# --- PyTorch --------------------------------------------------------------
+# MUST come from the cu128 index. The RTX 5070 Ti is Blackwell (sm_120), which
+# the default PyPI wheels (cu126 and older) do not contain kernels for: they
+# install fine and then fail at the first kernel launch with
+# "no kernel image is available for execution on the device".
+# cu128 wheels are forward-compatible with the A6000s (sm_86).
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.9.1+cu128
+torchvision==0.24.1+cu128
+
+# --- Detector -------------------------------------------------------------
+# Ultralytics is NOT installed from PyPI. It is cloned as a sibling of this
+# repo and installed editable, so custom modules can be added later without
+# vendoring a fork (see 04-method-open-questions.md, framework decision).
+#
+#     git clone https://github.com/ultralytics/ultralytics.git ../ultralytics
+#     git -C ../ultralytics checkout 8fbfccb8e6139f4e995f55d1272dc96e66699346
+#     pip install -e ../ultralytics
+#
+# PINNED COMMIT: 8fbfccb8e6139f4e995f55d1272dc96e66699346  (tag v8.4.115)
+# Resolved with `git ls-remote --tags` on 2026-08-01; `make setup` checks the
+# working tree out to exactly this SHA and will fail loudly if it drifts.
+
+# --- Experiment tracking --------------------------------------------------
+# Driven entirely through Ultralytics' built-in MLflow callback:
+#   yolo settings mlflow=True   +   MLFLOW_TRACKING_URI=file:outputs/mlruns
+# No mlflow calls appear in src/ or scripts/.
+mlflow==3.6.0
+
+# --- Data versioning ------------------------------------------------------
+dvc==3.65.0
+# dvc declares `pathspec>=0.10.3`, which now resolves to 1.x — and pathspec 1.0
+# removed the private `_DIR_MARK` that dvc/scmrepo still import. Installing dvc
+# without this pin gives a `dvc init` that dies with
+#   ImportError: cannot import name '_DIR_MARK' from pathspec.patterns.gitwildmatch
+# Hold pathspec on the 0.12 line until dvc's own bound catches up.
+pathspec==0.12.1
+
+# --- Data / imaging -------------------------------------------------------
+numpy==2.2.6
+opencv-python==4.12.0.88
+pillow==11.3.0
+pandas==2.3.3
+pyyaml==6.0.3
+lxml==6.0.2
+tqdm==4.67.1
+
+# --- Plotting (EDA + verification renders) --------------------------------
+matplotlib==3.10.7
+seaborn==0.13.2
+
+# --- Notebooks (Task 3) ---------------------------------------------------
+jupyterlab==4.4.10
+ipykernel==6.31.0
+pyarrow==21.0.0
+
+# --- Tests ----------------------------------------------------------------
+pytest==8.4.2

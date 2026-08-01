@@ -1,0 +1,26 @@
+# Conda environment for the thesis scaffold.
+#
+#   conda env create -f environment.yml
+#   conda activate rsmoe
+#
+# Conda supplies ONLY the interpreter and the two things pip handles badly on
+# Windows (make, and a compiler-free git). Everything else — including torch —
+# is pinned in requirements.txt and installed by pip, so the two machines
+# (RTX 5070 Ti / Windows, 2x A6000 / Linux) resolve identical wheels.
+#
+# Python 3.12 is chosen because the cu128 wheels we pin ship cp312 builds for
+# both win_amd64 and linux_x86_64.
+name: rsmoe
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.12
+  - pip=25.2
+  # `make` is not present on Windows; the Makefile is the documented entrypoint
+  # on both machines, so it comes from conda rather than from chocolatey/apt.
+  - make=4.4.1
+  - git=2.51.0
+  - pip:
+      - -r requirements.txt
