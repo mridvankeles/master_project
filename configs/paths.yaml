@@ -1,0 +1,18 @@
+# Machine-specific source locations. THE ONLY file you edit per machine.
+#
+# Everything else in the repo resolves paths through src/utils/paths.py, so no
+# script contains an absolute path.
+#
+# `hazy_dior_root` must be the directory that directly contains:
+#     Annotations/Horizontal Bounding Boxes/
+#     ImageSets/Main/{train,val,test}.txt
+#     Hazy-DIOR/test/{gt,haze}/{thin,moderate,thick}/
+#
+# Note the release nests a second `Hazy-DIOR/` inside the first; point at the
+# OUTER one.
+
+# --- RTX 5070 Ti (Windows) ---
+hazy_dior_root: C:/Users/Ridvan/Desktop/tez/NIR-Net_hazyDior/Hazy-DIOR
+
+# --- 2x A6000 (Linux) --- swap the line above for something like:
+# hazy_dior_root: /data/datasets/Hazy-DIOR

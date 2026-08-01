@@ -1,0 +1,9 @@
+# Template. Copy to configs/paths.yaml and edit the one path below.
+#
+# `hazy_dior_root` must directly contain:
+#     Annotations/Horizontal Bounding Boxes/
+#     ImageSets/Main/{train,val,test}.txt
+#     Hazy-DIOR/test/{gt,haze}/{thin,moderate,thick}/
+#
+# The release nests a second `Hazy-DIOR/` inside the first; point at the OUTER one.
+hazy_dior_root: /path/to/Hazy-DIOR
