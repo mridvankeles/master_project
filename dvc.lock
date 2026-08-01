@@ -1,0 +1,51 @@
+schema: '2.0'
+stages:
+  prepare:
+    cmd: python scripts/prepare_dataset.py
+    deps:
+    - path: configs/paths.yaml
+      hash: md5
+      md5: f7fcbfc2a27609bc5578a408764f9e25
+      size: 706
+    - path: scripts/prepare_dataset.py
+      hash: md5
+      md5: b554782bc4fdb837f25aa439c89031d4
+      size: 3289
+    - path: src/data/build_dataset.py
+      hash: md5
+      md5: 3b8791c2ae2c1f9dd303e242614ca68e
+      size: 7755
+    - path: src/data/dior_classes.py
+      hash: md5
+      md5: e304797f4395e7b1d41abb60b1da9782
+      size: 1923
+    - path: src/data/pairing.py
+      hash: md5
+      md5: 5dd0b10477df4fc92ecce19d132f61d8
+      size: 15497
+    - path: src/data/voc_hbb.py
+      hash: md5
+      md5: 1604f56e713e54293e3e00a1ebcdbe9c
+      size: 7736
+    outs:
+    - path: data/dior_hbb
+      hash: md5
+      md5: eaed592998ab88bf83cbdcb4a9403398.dir
+      size: 1422342262
+      nfiles: 20857
+  verify:
+    cmd: python scripts/render_verification.py
+    deps:
+    - path: data/dior_hbb
+      hash: md5
+      md5: eaed592998ab88bf83cbdcb4a9403398.dir
+      size: 1422342262
+      nfiles: 20857
+    - path: scripts/render_verification.py
+      hash: md5
+      md5: 2153ffb1d8acbfc1d02aa6681e589d1a
+      size: 8528
+    - path: src/data/voc_hbb.py
+      hash: md5
+      md5: 1604f56e713e54293e3e00a1ebcdbe9c
+      size: 7736

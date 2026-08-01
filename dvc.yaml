@@ -1,0 +1,46 @@
+# Reproducible data pipeline.
+#
+#     dvc repro          # rebuild whatever is stale
+#     dvc push           # send data/dior_hbb to the local remote (../dvcstore)
+#
+# CAVEAT worth knowing: the source imagery lives OUTSIDE this repo (see
+# configs/paths.yaml), so DVC hashes the derived corpus but cannot hash the
+# release it came from. `scripts/check_pairing.py` is what guards against the
+# release changing underneath you — run it (via `make data`) before trusting a
+# `dvc repro` that reports everything up to date.
+#
+# check_pairing is deliberately NOT a stage here. It is a guard that exits
+# non-zero on a structural surprise, and a guard that halts `dvc repro` is a
+# guard people delete.
+
+stages:
+  prepare:
+    cmd: python scripts/prepare_dataset.py
+    desc: >
+      Convert DIOR HBB annotations to Ultralytics format and materialise the
+      clear/fog corpus over the 2,607 DIOR-ID-aligned images. Splits come from
+      ImageSets/Main, never from the release's directory names.
+    deps:
+      - configs/paths.yaml
+      - scripts/prepare_dataset.py
+      - src/data/build_dataset.py
+      - src/data/dior_classes.py
+      - src/data/pairing.py
+      - src/data/voc_hbb.py
+    outs:
+      - data/dior_hbb
+
+  verify:
+    cmd: python scripts/render_verification.py
+    desc: >
+      Draw converted boxes back onto the images. The output is for human
+      inspection — boxes must sit ON the objects.
+    deps:
+      - data/dior_hbb
+      - scripts/render_verification.py
+      - src/data/voc_hbb.py
+    # No `outs`. The renders are disposable artefacts for a human to look at,
+    # they live under the gitignored outputs/, and declaring them would make DVC
+    # either cache a few MB of JPEGs for no reason or demand they be git-tracked.
+    # The cost is that this stage always re-runs, which is what we want anyway.
+    always_changed: true
