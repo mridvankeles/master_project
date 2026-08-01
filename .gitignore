@@ -1,0 +1,48 @@
+# --- data (contents are DVC-tracked, never git-tracked) ---------------------
+/data/*
+!/data/.gitignore
+!/data/*.dvc
+
+# --- generated configs ------------------------------------------------------
+# Written by scripts/prepare_dataset.py and containing absolute, machine-local
+# dataset paths. Committing them would guarantee a conflict every time the two
+# machines run `make data`. Everything else under configs/ IS version-controlled.
+/configs/data/dior_*.yaml
+
+# --- run artefacts ----------------------------------------------------------
+/outputs/
+mlruns/
+runs/
+
+# --- checkpoints ------------------------------------------------------------
+*.pt
+*.pth
+*.onnx
+*.engine
+*.torchscript
+
+# --- vendored, editable-installed Ultralytics -------------------------------
+# cloned as a sibling of this repo by `make setup`; never committed here
+/ultralytics/
+
+# --- python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# --- editors / os -----------------------------------------------------------
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

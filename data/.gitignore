@@ -1,0 +1,4 @@
+# Everything in data/ is DVC-tracked. Nothing here belongs in git.
+*
+!.gitignore
+!*.dvc
