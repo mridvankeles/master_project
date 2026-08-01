@@ -177,7 +177,7 @@ def check_stride_rule(paths: SourcePaths) -> Check:
         passed=passed,
         detail=(
             f"{len(ids):,} aligned ids, {len(violations)} violating "
-            f"id %% {ALIGNED_STRIDE} == {ALIGNED_RESIDUE}; "
+            f"id % {ALIGNED_STRIDE} == {ALIGNED_RESIDUE}; "
             f"{len(ids):,} x {ALIGNED_STRIDE} = {len(ids) * ALIGNED_STRIDE:,} "
             f"vs {TOTAL_DIOR_IDS:,} total ids"
         ),
