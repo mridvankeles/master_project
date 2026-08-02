@@ -111,9 +111,14 @@ def load_paths(config: str | Path | None = None) -> SourcePaths:
     return SourcePaths(hazy_dior_root=root)
 
 
-def dataset_root() -> Path:
-    """Where `prepare_dataset` materialises the Ultralytics-format corpus."""
-    return DATA_DIR / "dior_hbb"
+def dataset_root(task: str = "detect") -> Path:
+    """Where `prepare_dataset` materialises the Ultralytics-format corpus.
+
+    HBB and OBB get separate roots. Sharing one would let an oriented label be
+    handed to a detect model (or the reverse), which trains without complaint
+    and reports nonsense.
+    """
+    return DATA_DIR / ("dior_hbb" if task == "detect" else "dior_obb")
 
 
 def ensure_dir(path: Path) -> Path:

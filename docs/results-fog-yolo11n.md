@@ -5,7 +5,15 @@ run of the pipeline; a plumbing result, not a thesis result. Read the caveats.
 
 - Commit: `46604ef` · seed 0 · RTX 5070 Ti · torch 2.9.1+cu128 · Ultralytics 8.4.115
 - Config: `configs/train/fog_yolo11n.yaml` — yolo11n @640, 100 epochs, batch 16,
-  COCO-pretrained, `optimizer: auto`, `cos_lr: true`
+  **from scratch**, `optimizer: auto`, `cos_lr: true`
+
+> **Correction.** This run was first recorded as COCO-pretrained. It was not.
+> The config said `pretrained: true`, which is a **silent no-op** with a `.yaml`
+> model — Ultralytics only loads weights when `pretrained` is a string path
+> (`engine/trainer.py:817-820`); given a bool it leaves `weights = None` and
+> builds from the yaml. The config now says `pretrained: false` explicitly. To
+> genuinely transfer from COCO, set `pretrained: yolo11n.pt`, which is the
+> obvious next improvement and should raise these numbers substantially.
 - Data: fog condition, 1,953 train / 1,953 val / 3,915 test images
   (651 / 651 / 1,305 unique DIOR ids × 3 haze severities)
 - Metric convention: Ultralytics/COCO, 101-point interpolation
@@ -30,7 +38,9 @@ number and val as a tuning signal only.
 
 **2. It had not converged.** Best epoch = **100 of 100**; mAP50 was still rising
 at the last epoch and `patience: 30` never triggered. The run is
-under-trained, not over-trained — a longer schedule should improve it.
+under-trained, not over-trained — a longer schedule should improve it. Training
+from scratch (see the correction above) makes that expected: 100 epochs on 1,953
+images is not much for a randomly initialised backbone.
 
 **3. Losses were still falling.** train box 3.65 → 1.18, cls 5.47 → 1.05,
 val box 2.81 → 1.49, val cls → 1.44 across 100 epochs, all monotone with no

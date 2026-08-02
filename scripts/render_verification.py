@@ -1,4 +1,4 @@
-"""Draw converted boxes onto images so the conversion can be checked by eye.
+﻿"""Draw converted boxes onto images so the conversion can be checked by eye.
 
     python scripts/render_verification.py
 
@@ -12,8 +12,8 @@ means the round trip xml -> to_yolo -> label.txt -> from_yolo -> pixels is what
 gets rendered, so an error anywhere in it is visible.
 
 Writes to outputs/verification/:
-  boxes_NN_<condition>_<split>_<id>.jpg  — 20 samples with boxes drawn
-  pair_<id>.jpg                          — clear|thin|moderate|thick side by side
+  boxes_NN_<condition>_<split>_<id>.jpg  â€” 20 samples with boxes drawn
+  pair_<id>.jpg                          â€” clear|thin|moderate|thick side by side
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from src.data.build_dataset import SPLITS  # noqa: E402
 from src.data.dior_classes import DIOR_CLASSES  # noqa: E402
 from src.data.pairing import SEVERITIES  # noqa: E402
 from src.data.voc_hbb import from_yolo  # noqa: E402
+from src.data.voc_obb import from_yolo_obb  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.paths import VERIFICATION_DIR, dataset_root, ensure_dir  # noqa: E402
 from src.utils.seed import DEFAULT_SEED, seed_everything  # noqa: E402
@@ -54,7 +55,8 @@ def _palette() -> list[tuple[int, int, int]]:
 PALETTE = _palette()
 
 
-def read_label(path: Path) -> list[tuple[int, float, float, float, float]]:
+def read_label(path: Path) -> list[list[float]]:
+    """Rows of `class` + 4 (detect) or 8 (obb) normalised values."""
     if not path.exists():
         return []
     rows = []
@@ -62,29 +64,45 @@ def read_label(path: Path) -> list[tuple[int, float, float, float, float]]:
         if not line.strip():
             continue
         parts = line.split()
-        rows.append((int(parts[0]), *(float(v) for v in parts[1:5])))
+        rows.append([float(v) for v in parts])
     return rows
 
 
-def draw(image_path: Path, label_path: Path) -> "cv2.typing.MatLike":
+def draw(image_path: Path, label_path: Path, task: str = "detect") -> "cv2.typing.MatLike":
+    import numpy as np
+
     img = cv2.imread(str(image_path))
     if img is None:
         raise FileNotFoundError(f"cannot read image: {image_path}")
     h, w = img.shape[:2]
 
-    for cls, cx, cy, bw, bh in read_label(label_path):
-        box = from_yolo(cls, cx, cy, bw, bh, w, h)
+    for row in read_label(label_path):
+        cls = int(row[0])
         colour = PALETTE[cls % len(PALETTE)]
-        p1 = (int(round(box.xmin)), int(round(box.ymin)))
-        p2 = (int(round(box.xmax)), int(round(box.ymax)))
-        cv2.rectangle(img, p1, p2, colour, 2)
+
+        if task == "obb":
+            poly = from_yolo_obb(cls, tuple(row[1:9]), w, h)
+            pts = np.array(
+                [[int(round(poly.coords[2 * i])), int(round(poly.coords[2 * i + 1]))]
+                 for i in range(4)],
+                dtype=np.int32,
+            )
+            cv2.polylines(img, [pts], isClosed=True, color=colour, thickness=2)
+            anchor = (int(pts[:, 0].min()), int(pts[:, 1].min()))
+        else:
+            box = from_yolo(cls, *row[1:5], w, h)
+            anchor = (int(round(box.xmin)), int(round(box.ymin)))
+            cv2.rectangle(
+                img, anchor,
+                (int(round(box.xmax)), int(round(box.ymax))), colour, 2,
+            )
 
         name = DIOR_CLASSES[cls]
         (tw, th), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
-        ty = max(p1[1], th + 4)
-        cv2.rectangle(img, (p1[0], ty - th - 4), (p1[0] + tw + 4, ty), colour, -1)
+        ty = max(anchor[1], th + 4)
+        cv2.rectangle(img, (anchor[0], ty - th - 4), (anchor[0] + tw + 4, ty), colour, -1)
         cv2.putText(
-            img, name, (p1[0] + 2, ty - 3),
+            img, name, (anchor[0] + 2, ty - 3),
             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1, cv2.LINE_AA,
         )
     return img
@@ -95,7 +113,7 @@ def banner(img, text: str):
 
     The strip is ADDED above the image rather than drawn onto it. Painting over
     the top rows would hide exactly the region where a normalisation error
-    shows up first — a box that should touch y=0 but does not.
+    shows up first â€” a box that should touch y=0 but does not.
     """
     import numpy as np
 
@@ -129,14 +147,15 @@ def main() -> int:
     parser.add_argument("--out", default=None, help="output directory")
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--n", type=int, default=N_SAMPLES)
+    parser.add_argument("--task", default="detect", choices=["detect", "obb"])
     args = parser.parse_args()
 
     seed_everything(args.seed)
     rng = random.Random(args.seed)
 
-    root = Path(args.dataset) if args.dataset else dataset_root()
+    root = Path(args.dataset) if args.dataset else dataset_root(args.task)
     if not root.is_dir():
-        log.error("dataset root not found: %s — run scripts/prepare_dataset.py first", root)
+        log.error("dataset root not found: %s â€” run scripts/prepare_dataset.py first", root)
         return 2
 
     out_dir = ensure_dir(Path(args.out) if args.out else VERIFICATION_DIR)
@@ -146,7 +165,7 @@ def main() -> int:
 
     # Sample the two conditions SEPARATELY and in equal numbers. Drawing from a
     # single pool would hand back roughly 3:1 fog, because fog carries three
-    # severities per id — and a converter bug specific to the clear branch
+    # severities per id â€” and a converter bug specific to the clear branch
     # could then hide behind two or three samples.
     def pool_for(collected) -> list[tuple[str, str, Path, Path]]:
         return [
@@ -167,7 +186,7 @@ def main() -> int:
     per_condition = max(1, args.n // 2)
     chosen: list[tuple[str, str, Path, Path]] = []
     for condition_name, entries in pools.items():
-        # Prefer images that actually have boxes — an empty render verifies nothing.
+        # Prefer images that actually have boxes â€” an empty render verifies nothing.
         with_boxes = [e for e in entries if e[3].exists() and e[3].stat().st_size > 0]
         candidates = with_boxes or entries
         if not candidates:
@@ -178,15 +197,15 @@ def main() -> int:
 
     written = 0
     for idx, (cond, split, img_path, lbl_path) in enumerate(chosen, start=1):
-        img = draw(img_path, lbl_path)
+        img = draw(img_path, lbl_path, args.task)
         n = len(read_label(lbl_path))
         img = banner(img, f"{cond}/{split}  {img_path.stem}  ({n} boxes)")
-        dst = out_dir / f"boxes_{idx:02d}_{cond}_{split}_{img_path.stem}.jpg"
+        dst = out_dir / f"{args.task}_{idx:02d}_{cond}_{split}_{img_path.stem}.jpg"
         cv2.imwrite(str(dst), img)
         written += 1
 
     # Side-by-side panels: same DIOR id, clear next to all three fog severities.
-    # This is the visual confirmation that the aligned pairing really holds —
+    # This is the visual confirmation that the aligned pairing really holds â€”
     # the boxes must land on the same objects in all four frames.
     clear_by_id = {
         i.stem: (i, l) for split in SPLITS for i, l in clear.get(split, [])
@@ -203,16 +222,16 @@ def main() -> int:
     for image_id in sorted(pair_ids):
         frames = []
         ci, cl = clear_by_id[image_id]
-        frames.append(banner(draw(ci, cl), f"clear  {image_id}"))
+        frames.append(banner(draw(ci, cl, args.task), f"clear  {image_id}"))
         for sev in SEVERITIES:
             key = f"{image_id}_{sev}"
             if key in fog_lookup:
                 fi, fl = fog_lookup[key]
-                frames.append(banner(draw(fi, fl), f"fog/{sev}  {image_id}"))
+                frames.append(banner(draw(fi, fl, args.task), f"fog/{sev}  {image_id}"))
         if len(frames) < 2:
             continue
         panel = np.hstack(frames)
-        dst = out_dir / f"pair_{image_id}.jpg"
+        dst = out_dir / f"{args.task}_pair_{image_id}.jpg"
         cv2.imwrite(str(dst), panel)
         written += 1
 
@@ -223,3 +242,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -1,4 +1,4 @@
-"""Train a stock YOLO11 HBB detector from a config.
+﻿"""Train a stock YOLO11 HBB detector from a config.
 
     python scripts/train.py --config configs/train/smoke.yaml
     python scripts/train.py --config configs/train/fog_yolo11n.yaml
@@ -44,8 +44,8 @@ RUNS_DIR = OUTPUT_DIR / "runs"
 
 def build_subset_data_yaml(cfg: RunConfig) -> Path:
     """Write class-stratified train/val image lists plus a data yaml for them."""
-    root = dataset_root() / cfg.condition
-    out_dir = ensure_dir(dataset_root() / "subsets")
+    root = dataset_root(cfg.task) / cfg.condition
+    out_dir = ensure_dir(dataset_root(cfg.task) / "subsets")
 
     lists: dict[str, Path] = {}
     for split, n in (cfg.subset or {}).items():
@@ -126,12 +126,12 @@ def main() -> int:
 
     data_yaml = build_subset_data_yaml(cfg) if cfg.subset else cfg.data_yaml
     if not data_yaml.exists():
-        log.error("data yaml missing: %s — run scripts/prepare_dataset.py first", data_yaml)
+        log.error("data yaml missing: %s â€” run scripts/prepare_dataset.py first", data_yaml)
         return 2
 
     counts = count_images(data_yaml)
     log.info("config     : %s", cfg.path.relative_to(REPO_ROOT))
-    log.info("condition  : %s", cfg.condition)
+    log.info("condition  : %s   task: %s", cfg.condition, cfg.task)
     log.info("data       : %s  %s", data_yaml, counts)
     log.info("model      : %s (scale %s)", cfg.model_path.name, cfg.scale)
     log.info("seed       : %s   commit: %s", cfg.seed, commit)
@@ -143,7 +143,7 @@ def main() -> int:
     if args.epochs is not None:
         train_args["epochs"] = args.epochs
 
-    import mlflow  # provenance only — no metrics are logged from this file
+    import mlflow  # provenance only â€” no metrics are logged from this file
     import torch
 
     mlflow.set_tracking_uri(tracking_uri)
@@ -157,7 +157,8 @@ def main() -> int:
                 "git_commit": commit,
                 "config": str(cfg.path.relative_to(REPO_ROOT)),
                 "condition": cfg.condition,
-                "box_format": "hbb",
+                "box_format": "hbb" if cfg.task == "detect" else "obb",
+                "task": cfg.task,
                 "model_cfg": cfg.model_path.name,
                 "scale": cfg.scale,
                 "ultralytics": ultralytics.__version__,
@@ -171,7 +172,7 @@ def main() -> int:
         mlflow.log_artifact(str(cfg.path))
         mlflow.log_artifact(str(cfg.model_path))
 
-        model = YOLO(str(cfg.scaled_model()), task="detect")
+        model = YOLO(str(cfg.scaled_model()), task=cfg.task)
         model.train(
             data=str(data_yaml),
             project=str(RUNS_DIR),
@@ -189,3 +190,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

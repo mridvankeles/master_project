@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data.build_dataset import (  # noqa: E402
     CONDITIONS,
     SPLITS,
+    TASKS,
     build,
     write_data_yaml,
     write_manifest,
@@ -41,6 +42,12 @@ def main() -> int:
         choices=list(CONDITIONS),
         help="which conditions to materialise",
     )
+    parser.add_argument(
+        "--task",
+        default="detect",
+        choices=list(TASKS),
+        help="detect = horizontal boxes (default); obb = oriented",
+    )
     args = parser.parse_args()
 
     paths = load_paths(args.config)
@@ -50,11 +57,11 @@ def main() -> int:
             log.error(p)
         return 2
 
-    out_root = ensure_dir(Path(args.out) if args.out else dataset_root())
+    out_root = ensure_dir(Path(args.out) if args.out else dataset_root(args.task))
     log.info("source: %s", paths.hazy_dior_root)
-    log.info("target: %s", out_root)
+    log.info("target: %s   task: %s", out_root, args.task)
 
-    report = build(paths, out_root, conditions=tuple(args.conditions))
+    report = build(paths, out_root, conditions=tuple(args.conditions), task=args.task)
 
     counts = report.counts()
     for cond in args.conditions:
@@ -88,8 +95,11 @@ def main() -> int:
     manifest = write_manifest(report, out_root)
     log.info("wrote %s (%s rows)", manifest, f"{len(report.rows):,}")
 
+    suffix = "" if args.task == "detect" else "_obb"
     for cond in args.conditions:
-        dst = write_data_yaml(out_root, cond, CONFIG_DIR / "data" / f"dior_{cond}.yaml")
+        dst = write_data_yaml(
+            out_root, cond, CONFIG_DIR / "data" / f"dior_{cond}{suffix}.yaml", task=args.task
+        )
         log.info("wrote %s", dst)
 
     empty = [

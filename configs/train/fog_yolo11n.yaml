@@ -1,15 +1,22 @@
-# Fog condition, full aligned split, yolo11n.
+# Fog condition, full aligned split, yolo11n, HORIZONTAL boxes.
 #
 # Train 1,953 / val 1,953 / test 3,915 images (651 unique DIOR ids per split,
 # times three haze severities). Splits come from DIOR ImageSets/Main.
 #
-# `pretrained: true` starts from COCO weights. State this in the thesis — it is a
-# transfer-learning result, not from-scratch, and with 1,953 training images it
-# is the only sane choice. Set it false for the from-scratch ablation.
+# TRAINED FROM SCRATCH - state this in the thesis.
+#
+# `pretrained: false` is written explicitly because `pretrained: true` is a
+# SILENT NO-OP with a .yaml model. Ultralytics only loads weights when
+# `pretrained` is a string path (engine/trainer.py:817-820); given a bool it
+# leaves weights = None and builds from the yaml. An earlier version of this
+# config said `true` and was believed to be COCO-pretrained. It was not.
+#
+# To genuinely transfer from COCO, set `pretrained: yolo11n.pt`.
 
 run_name: fog_yolo11n
 experiment: dior-hbb
 condition: fog
+task: detect
 seed: 0
 
 model: configs/model/yolo11_dior_hbb.yaml
@@ -24,7 +31,7 @@ train:
   optimizer: auto
   patience: 30
   cos_lr: true
-  pretrained: true
+  pretrained: false
   val: true
   plots: true
   save_period: -1

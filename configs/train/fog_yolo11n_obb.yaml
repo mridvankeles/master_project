@@ -1,0 +1,40 @@
+# Fog condition, ORIENTED boxes. The OBB counterpart of fog_yolo11n.yaml.
+#
+# EVERY hyperparameter is identical to the HBB config - same epochs, imgsz,
+# batch, optimizer, schedule, seed, and the same from-scratch initialisation.
+# The only differences are the annotation set (oriented instead of horizontal)
+# and the detection head (OBB instead of Detect). That is deliberate: it makes
+# HBB vs OBB a controlled comparison rather than two unrelated runs.
+#
+# WHY THIS ARM EXISTS
+# 03-datasets.md decided HBB and argued against OBB. This does not overturn that
+# - HBB remains the primary arm. NIRNet, the only published work on Hazy-DIOR,
+# reports OBB, so a like-for-like comparison needs an oriented model. See
+# docs/comparison-baselines.md for what is and is not comparable.
+#
+# Trained from scratch, same as the HBB arm. See fog_yolo11n.yaml on why
+# `pretrained: true` would be a silent no-op here.
+
+run_name: fog_yolo11n_obb
+experiment: dior-obb
+condition: fog
+task: obb
+seed: 0
+
+model: configs/model/yolo11_dior_obb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: false
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
