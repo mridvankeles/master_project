@@ -1,7 +1,7 @@
-﻿# Clear condition, full aligned split, yolo11n. The control arm.
+# Clear condition, full aligned split, yolo11n. The control arm.
 #
 # Train 651 / val 651 / test 1,305 images. One third the size of the fog config
-# because clear has no severity variants â€” the same 651 DIOR ids, once each.
+# because clear has no severity variants — the same 651 DIOR ids, once each.
 #
 # NOTE FOR THE THESIS: this is NOT "the DIOR baseline". Published DIOR numbers
 # train on 5,862 images; this trains on 651, because only 2,607 of the 23,463

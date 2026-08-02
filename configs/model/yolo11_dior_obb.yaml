@@ -1,17 +1,17 @@
-﻿# YOLO11 detection (ORIENTED boxes) for the 20-class DIOR taxonomy.
+# YOLO11 detection (ORIENTED boxes) for the 20-class DIOR taxonomy.
 #
 # ARCHITECTURALLY IDENTICAL to Ultralytics' stock `yolo11-obb.yaml`. The only change
 # is `nc: 80 -> 20`. Nothing is added, removed or reordered, so this is still the
-# stock model per the standing rule â€” it is copied into the repo purely so the
+# stock model per the standing rule — it is copied into the repo purely so the
 # MoE block has a version-controlled file to land in later, instead of us editing
 # a file inside the pip-installed Ultralytics clone (which `git checkout` would
 # silently revert).
 #
-# WHEN THE MoE ARRIVES (not now â€” see 04-method-open-questions.md open question 1)
+# WHEN THE MoE ARRIVES (not now — see 04-method-open-questions.md open question 1)
 # the recommendation there is expert branches as a BLOCK inside one shared
 # network, gated on the incoming feature map, placed deep rather than early.
-# That means replacing exactly one line below â€” the C2PSA at index 10, end of
-# backbone â€” or one of the neck C3k2 stages, and adding the module to
+# That means replacing exactly one line below — the C2PSA at index 10, end of
+# backbone — or one of the neck C3k2 stages, and adding the module to
 # ultralytics/nn/modules/__init__.py plus a branch in parse_model(). Layer
 # indices are load-bearing: `Concat` and `Detect` reference them by number, so
 # any insertion that shifts indices must update lines 12, 15, 18, 21 and 24.
@@ -21,7 +21,7 @@
 # comparison needs an oriented model. HBB remains the primary arm.
 
 # Parameters
-nc: 20 # DIOR classes â€” order fixed by src/data/dior_classes.py
+nc: 20 # DIOR classes — order fixed by src/data/dior_classes.py
 scales: # `model=yolo11n.yaml` selects scale 'n'
   # [depth, width, max_channels]
   n: [0.50, 0.25, 1024] # 181 layers, 2624080 parameters, 6.6 GFLOPs

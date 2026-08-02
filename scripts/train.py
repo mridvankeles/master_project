@@ -1,4 +1,4 @@
-﻿"""Train a stock YOLO11 HBB detector from a config.
+"""Train a stock YOLO11 HBB detector from a config.
 
     python scripts/train.py --config configs/train/smoke.yaml
     python scripts/train.py --config configs/train/fog_yolo11n.yaml
@@ -126,7 +126,7 @@ def main() -> int:
 
     data_yaml = build_subset_data_yaml(cfg) if cfg.subset else cfg.data_yaml
     if not data_yaml.exists():
-        log.error("data yaml missing: %s â€” run scripts/prepare_dataset.py first", data_yaml)
+        log.error("data yaml missing: %s — run scripts/prepare_dataset.py first", data_yaml)
         return 2
 
     counts = count_images(data_yaml)
@@ -143,7 +143,7 @@ def main() -> int:
     if args.epochs is not None:
         train_args["epochs"] = args.epochs
 
-    import mlflow  # provenance only â€” no metrics are logged from this file
+    import mlflow  # provenance only — no metrics are logged from this file
     import torch
 
     mlflow.set_tracking_uri(tracking_uri)

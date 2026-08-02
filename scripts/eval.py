@@ -23,8 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.eval.qualitative import fixed_sample, render_all  # noqa: E402
+from src.eval.qualitative import fixed_sample, labels_for, render_all  # noqa: E402
 from src.eval.report import from_ultralytics  # noqa: E402
+from src.eval.voc07 import Detection, GroundTruth, evaluate_voc07  # noqa: E402
 from src.utils.config import load_run_config  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.paths import OUTPUT_DIR, dataset_root, ensure_dir  # noqa: E402
@@ -33,6 +34,98 @@ from src.utils.seed import git_commit, seed_everything  # noqa: E402
 log = get_logger("eval")
 
 N_QUALITATIVE = 12
+
+# Low enough that the precision/recall curve is not truncated, high enough that
+# NMS stays tractable. Ultralytics' validator uses 0.001, but it batches NMS
+# internally; calling predict() at 0.001 over a whole split builds an IoU matrix
+# from ~8400 anchors x 20 classes and OOMs a 16 GB card outright. 0.01 keeps the
+# tail of the curve that matters for AP.
+VOC07_CONF = 0.01
+VOC07_MAX_DET = 300  # Ultralytics' own default
+VOC07_CHUNK = 64  # images per predict() call, so peak memory stays bounded
+
+
+def collect_for_voc07(
+    model,
+    images_dir: Path,
+    task: str,
+    imgsz: int,
+    device: str,
+    conf: float = VOC07_CONF,
+):
+    """Run the model over a whole split and pair detections with ground truth.
+
+    Returns (detections, ground_truths) in absolute pixel coordinates: 4 corner
+    values for `detect`, 8 polygon values for `obb`.
+    """
+    images = sorted(
+        p for p in images_dir.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}
+    )
+    detections: list[Detection] = []
+    ground_truths: list[GroundTruth] = []
+
+    for path in images:
+        img_w = img_h = None
+        lbl = labels_for(path)
+        if lbl.exists():
+            from PIL import Image
+
+            with Image.open(path) as im:
+                img_w, img_h = im.size
+            for line in lbl.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split()
+                cls = int(parts[0])
+                vals = [float(v) for v in parts[1:]]
+                if task == "obb":
+                    coords = tuple(
+                        vals[i] * (img_w if i % 2 == 0 else img_h) for i in range(8)
+                    )
+                else:
+                    cx, cy, w, h = vals[:4]
+                    coords = (
+                        (cx - w / 2) * img_w, (cy - h / 2) * img_h,
+                        (cx + w / 2) * img_w, (cy + h / 2) * img_h,
+                    )
+                ground_truths.append(GroundTruth(path.stem, cls, coords))
+
+    for start in range(0, len(images), VOC07_CHUNK):
+        chunk = images[start : start + VOC07_CHUNK]
+        results = model.predict(
+            [str(p) for p in chunk],
+            imgsz=imgsz,
+            device=device,
+            conf=conf,
+            max_det=VOC07_MAX_DET,
+            stream=True,
+            verbose=False,
+        )
+        _absorb(detections, chunk, results, task)
+
+    return detections, ground_truths
+
+
+def _absorb(detections, images, results, task: str) -> None:
+    for path, res in zip(images, results):
+        if task == "obb":
+            obb = getattr(res, "obb", None)
+            if obb is None or len(obb) == 0:
+                continue
+            polys = obb.xyxyxyxy.cpu().numpy().reshape(len(obb), 8)
+            cls = obb.cls.cpu().numpy().astype(int)
+            conf = obb.conf.cpu().numpy()
+            for p, c, s in zip(polys, cls, conf):
+                detections.append(Detection(path.stem, int(c), float(s), tuple(float(v) for v in p)))
+        else:
+            box = res.boxes
+            if box is None or len(box) == 0:
+                continue
+            xyxy = box.xyxy.cpu().numpy()
+            cls = box.cls.cpu().numpy().astype(int)
+            conf = box.conf.cpu().numpy()
+            for b, c, s in zip(xyxy, cls, conf):
+                detections.append(Detection(path.stem, int(c), float(s), tuple(float(v) for v in b)))
 
 
 def main() -> int:
@@ -46,6 +139,10 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--name", default=None, help="output subdirectory name")
     parser.add_argument("--n-qualitative", type=int, default=N_QUALITATIVE)
+    parser.add_argument("--voc07-conf", type=float, default=VOC07_CONF)
+
+    parser.add_argument("--skip-voc07", action="store_true",
+                        help="skip the VOC07 pass (it re-runs inference over the split)")
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -59,6 +156,7 @@ def main() -> int:
         return 2
 
     condition = cfg.condition if cfg else "fog"
+    task = cfg.task if cfg else "detect"
     data_yaml = cfg.data_yaml if cfg else (
         Path(__file__).resolve().parents[1] / "configs" / "data" / f"dior_{condition}.yaml"
     )
@@ -77,7 +175,7 @@ def main() -> int:
     log.info("checkpoint : %s", checkpoint)
     log.info("data       : %s  split=%s  imgsz=%s", data_yaml, args.split, imgsz)
 
-    model = YOLO(str(checkpoint))
+    model = YOLO(str(checkpoint), task=task)
 
     # --- quantitative -----------------------------------------------------
     results = model.val(
@@ -118,14 +216,42 @@ def main() -> int:
         log.error("METRICS DISAGREE with Ultralytics — do not trust this table")
         return 1
 
+    # --- VOC07 11-point mAP@0.5, the convention NIRNet reports ------------
+    images_dir = dataset_root(task) / condition / "images" / args.split
+    if images_dir.is_dir() and not args.skip_voc07:
+        log.info("computing VOC07 11-point mAP@0.5 over %s ...", args.split)
+        dets, gts = collect_for_voc07(model, images_dir, task, imgsz, args.device, args.voc07_conf)
+        voc = evaluate_voc07(dets, gts, task=task)
+        log.info(
+            "VOC07 mAP@0.5 = %.4f   (Ultralytics COCO mAP50 = %.4f, delta %+.4f)",
+            voc.mean_ap, report.overall["mAP50"], voc.mean_ap - report.overall["mAP50"],
+        )
+        (out_dir / "voc07.json").write_text(
+            json.dumps(
+                {
+                    "convention": "VOC07 11-point interpolation, IoU 0.50, "
+                                  "matching nirnet mmrotate use_07_metric=True",
+                    "task": task,
+                    "split": args.split,
+                    "mAP@0.5": voc.mean_ap,
+                    "ultralytics_mAP50_coco101": report.overall["mAP50"],
+                    "n_detections": len(dets),
+                    "n_ground_truth": len(gts),
+                    "per_class_ap": voc.per_class_ap,
+                    "per_class_gt": voc.per_class_gt,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
     # --- qualitative ------------------------------------------------------
-    images_dir = dataset_root() / condition / "images" / args.split
     if images_dir.is_dir():
         picks = fixed_sample(
             images_dir,
             n=args.n_qualitative,
             seed=args.seed,
-            cache=OUTPUT_DIR / "eval" / f"fixed_images_{condition}_{args.split}.json",
+            cache=OUTPUT_DIR / "eval" / f"fixed_images_{task}_{condition}_{args.split}.json",
         )
         preds = model.predict(
             [str(p) for p in picks],
@@ -134,7 +260,7 @@ def main() -> int:
             conf=args.conf,
             verbose=False,
         )
-        summary = render_all(picks, preds, out_dir)
+        summary = render_all(picks, preds, out_dir, task=task)
         (out_dir / "qualitative.json").write_text(
             json.dumps({"conf": args.conf, "images": summary}, indent=2), encoding="utf-8"
         )
@@ -148,3 +274,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

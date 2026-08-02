@@ -70,12 +70,24 @@ def fixed_sample(images_dir: Path, n: int, seed: int, cache: Path) -> list[Path]
     return picks
 
 
-def _draw(img, boxes: list[tuple[int, float, float, float, float, float | None]]):
-    """boxes: (cls, x1, y1, x2, y2, conf|None) in absolute pixels."""
-    for cls, x1, y1, x2, y2, conf in boxes:
+def _draw(img, shapes: list[tuple[int, tuple[float, ...], float | None]]):
+    """shapes: (cls, coords, conf|None) in absolute pixels.
+
+    `coords` is 4 values (x1,y1,x2,y2) for detect or 8 polygon values for obb.
+    """
+    for cls, coords, conf in shapes:
         colour = PALETTE[cls % len(PALETTE)]
-        p1, p2 = (int(round(x1)), int(round(y1))), (int(round(x2)), int(round(y2)))
-        cv2.rectangle(img, p1, p2, colour, 2)
+        if len(coords) == 8:
+            pts = np.array(
+                [[int(round(coords[2 * i])), int(round(coords[2 * i + 1]))] for i in range(4)],
+                dtype=np.int32,
+            )
+            cv2.polylines(img, [pts], isClosed=True, color=colour, thickness=2)
+            p1 = (int(pts[:, 0].min()), int(pts[:, 1].min()))
+        else:
+            x1, y1, x2, y2 = coords
+            p1, p2 = (int(round(x1)), int(round(y1))), (int(round(x2)), int(round(y2)))
+            cv2.rectangle(img, p1, p2, colour, 2)
         text = DIOR_CLASSES[cls] if conf is None else f"{DIOR_CLASSES[cls]} {conf:.2f}"
         (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)
         ty = max(p1[1], th + 4)
@@ -95,7 +107,7 @@ def _caption(img, text: str, height: int = 28):
     return np.vstack([strip, img])
 
 
-def read_gt(image_path: Path, w: int, h: int) -> list[tuple[int, float, float, float, float, None]]:
+def read_gt(image_path: Path, w: int, h: int, task: str = "detect"):
     lbl = labels_for(image_path)
     if not lbl.exists():
         return []
@@ -104,28 +116,45 @@ def read_gt(image_path: Path, w: int, h: int) -> list[tuple[int, float, float, f
         if not line.strip():
             continue
         parts = line.split()
-        box = from_yolo(int(parts[0]), *(float(v) for v in parts[1:5]), w, h)
-        out.append((box.cls, box.xmin, box.ymin, box.xmax, box.ymax, None))
+        cls = int(parts[0])
+        vals = [float(v) for v in parts[1:]]
+        if task == "obb":
+            coords = tuple(vals[i] * (w if i % 2 == 0 else h) for i in range(8))
+        else:
+            box = from_yolo(cls, *vals[:4], w, h)
+            coords = (box.xmin, box.ymin, box.xmax, box.ymax)
+        out.append((cls, coords, None))
     return out
 
 
-def render_pair(image_path: Path, result, dst: Path) -> tuple[int, int]:
+def render_pair(image_path: Path, result, dst: Path, task: str = "detect") -> tuple[int, int]:
     """Write one GT | prediction panel. Returns (n_gt, n_pred)."""
     img = cv2.imread(str(image_path))
     if img is None:
         raise FileNotFoundError(image_path)
     h, w = img.shape[:2]
 
-    gt = read_gt(image_path, w, h)
+    gt = read_gt(image_path, w, h, task)
     preds = []
-    if result is not None and result.boxes is not None and len(result.boxes):
-        xyxy = result.boxes.xyxy.cpu().numpy()
-        cls = result.boxes.cls.cpu().numpy().astype(int)
-        conf = result.boxes.conf.cpu().numpy()
-        preds = [
-            (int(c), float(b[0]), float(b[1]), float(b[2]), float(b[3]), float(cf))
-            for b, c, cf in zip(xyxy, cls, conf)
-        ]
+    if result is not None:
+        if task == "obb":
+            obb = getattr(result, "obb", None)
+            if obb is not None and len(obb):
+                polys = obb.xyxyxyxy.cpu().numpy().reshape(len(obb), 8)
+                cls = obb.cls.cpu().numpy().astype(int)
+                conf = obb.conf.cpu().numpy()
+                preds = [
+                    (int(c), tuple(float(v) for v in p), float(cf))
+                    for p, c, cf in zip(polys, cls, conf)
+                ]
+        elif result.boxes is not None and len(result.boxes):
+            xyxy = result.boxes.xyxy.cpu().numpy()
+            cls = result.boxes.cls.cpu().numpy().astype(int)
+            conf = result.boxes.conf.cpu().numpy()
+            preds = [
+                (int(c), (float(b[0]), float(b[1]), float(b[2]), float(b[3])), float(cf))
+                for b, c, cf in zip(xyxy, cls, conf)
+            ]
 
     left = _caption(_draw(img.copy(), gt), f"GROUND TRUTH  {image_path.stem}  ({len(gt)} objects)")
     right = _caption(_draw(img.copy(), preds), f"PREDICTION  {image_path.stem}  ({len(preds)} detections)")
@@ -136,10 +165,10 @@ def render_pair(image_path: Path, result, dst: Path) -> tuple[int, int]:
     return len(gt), len(preds)
 
 
-def render_all(image_paths: list[Path], results, out_dir: Path) -> list[dict]:
+def render_all(image_paths: list[Path], results, out_dir: Path, task: str = "detect") -> list[dict]:
     """Render every (image, result) pair. Returns a small summary per image."""
     summary = []
     for path, result in zip(image_paths, results):
-        n_gt, n_pred = render_pair(path, result, out_dir / f"predvsgt_{path.stem}.jpg")
+        n_gt, n_pred = render_pair(path, result, out_dir / f"predvsgt_{path.stem}.jpg", task)
         summary.append({"image": path.name, "n_gt": n_gt, "n_pred": n_pred})
     return summary

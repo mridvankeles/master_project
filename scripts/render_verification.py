@@ -1,4 +1,4 @@
-﻿"""Draw converted boxes onto images so the conversion can be checked by eye.
+"""Draw converted boxes onto images so the conversion can be checked by eye.
 
     python scripts/render_verification.py
 
@@ -12,8 +12,8 @@ means the round trip xml -> to_yolo -> label.txt -> from_yolo -> pixels is what
 gets rendered, so an error anywhere in it is visible.
 
 Writes to outputs/verification/:
-  boxes_NN_<condition>_<split>_<id>.jpg  â€” 20 samples with boxes drawn
-  pair_<id>.jpg                          â€” clear|thin|moderate|thick side by side
+  boxes_NN_<condition>_<split>_<id>.jpg  — 20 samples with boxes drawn
+  pair_<id>.jpg                          — clear|thin|moderate|thick side by side
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def banner(img, text: str):
 
     The strip is ADDED above the image rather than drawn onto it. Painting over
     the top rows would hide exactly the region where a normalisation error
-    shows up first â€” a box that should touch y=0 but does not.
+    shows up first — a box that should touch y=0 but does not.
     """
     import numpy as np
 
@@ -155,7 +155,7 @@ def main() -> int:
 
     root = Path(args.dataset) if args.dataset else dataset_root(args.task)
     if not root.is_dir():
-        log.error("dataset root not found: %s â€” run scripts/prepare_dataset.py first", root)
+        log.error("dataset root not found: %s — run scripts/prepare_dataset.py first", root)
         return 2
 
     out_dir = ensure_dir(Path(args.out) if args.out else VERIFICATION_DIR)
@@ -165,7 +165,7 @@ def main() -> int:
 
     # Sample the two conditions SEPARATELY and in equal numbers. Drawing from a
     # single pool would hand back roughly 3:1 fog, because fog carries three
-    # severities per id â€” and a converter bug specific to the clear branch
+    # severities per id — and a converter bug specific to the clear branch
     # could then hide behind two or three samples.
     def pool_for(collected) -> list[tuple[str, str, Path, Path]]:
         return [
@@ -186,7 +186,7 @@ def main() -> int:
     per_condition = max(1, args.n // 2)
     chosen: list[tuple[str, str, Path, Path]] = []
     for condition_name, entries in pools.items():
-        # Prefer images that actually have boxes â€” an empty render verifies nothing.
+        # Prefer images that actually have boxes — an empty render verifies nothing.
         with_boxes = [e for e in entries if e[3].exists() and e[3].stat().st_size > 0]
         candidates = with_boxes or entries
         if not candidates:
@@ -205,7 +205,7 @@ def main() -> int:
         written += 1
 
     # Side-by-side panels: same DIOR id, clear next to all three fog severities.
-    # This is the visual confirmation that the aligned pairing really holds â€”
+    # This is the visual confirmation that the aligned pairing really holds —
     # the boxes must land on the same objects in all four frames.
     clear_by_id = {
         i.stem: (i, l) for split in SPLITS for i, l in clear.get(split, [])
