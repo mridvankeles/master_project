@@ -1,0 +1,53 @@
+# Clear-trained ORIENTED model. This is the NIRNet-protocol arm.
+#
+# WHY IT EXISTS
+# NIRNet trains on CLEAN images only and evaluates zero-shot on hazy ones
+# (paper p.1, p.10). It reports mAP_clean, mAP_hazy, and rPC = mAP_hazy /
+# mAP_clean. Our fog_yolo11n_obb run trains ON fog, which is a strictly easier
+# problem, so its number cannot be set against NIRNet's at all.
+#
+# This config reproduces NIRNet's protocol as closely as our data allows:
+#   train on clear  ->  eval on clear test  ->  mAP_clean
+#                   ->  eval on fog test    ->  mAP_hazy  (zero-shot)
+#   rPC = mAP_hazy / mAP_clean
+#
+# rPC is the number worth comparing. It is a ratio, so it cancels most of the
+# absolute-scale difference between a ResNet-50 Oriented R-CNN and a yolo11n,
+# and most of the box-format and metric-convention gap too. NIRNet reports
+# rPC 64.32 against Oriented R-CNN's 61.76.
+#
+# WHAT STILL DOES NOT MATCH, and must be stated in the thesis:
+#   - Their evaluation set is 11,738 DIOR-R test images; ours is 3,915 (1,305
+#     unique ids x 3 severities), because only 2,607 ids survive the release
+#     with their filename intact. See the pairing report.
+#   - Their degradation is cloud synthesis with per-image random transparency;
+#     ours is the release's three fixed haze severities.
+#   - Their backbone is ImageNet-pretrained ResNet-50; this trains from scratch.
+#   - 651 training images against their 5,862.
+#
+# Trained from scratch, matching the other arms. See fog_yolo11n.yaml on why
+# `pretrained: true` would be a silent no-op.
+
+run_name: clear_yolo11n_obb
+experiment: dior-obb
+condition: clear
+task: obb
+seed: 0
+
+model: configs/model/yolo11_dior_obb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: false
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
