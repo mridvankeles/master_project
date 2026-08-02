@@ -90,6 +90,25 @@ cleanly and then fail at the first kernel launch with *"no kernel image is
 available for execution on the device."* cu128 is also fine on the A6000s
 (sm_86), so both machines run the same pins.
 
+### If `conda activate rsmoe` does nothing (Windows)
+
+`conda init powershell` writes its hook into `Documents\WindowsPowerShell\profile.ps1`
+— the *CurrentUserAllHosts* profile, not the `Microsoft.PowerShell_profile.ps1`
+that `$PROFILE` prints. On a stock Windows install the execution policy defaults
+to `Restricted`, so that profile never loads, the hook never runs, and `conda`
+stays a bare `conda.exe`. Activation then silently fails: `conda activate` has to
+mutate the *current* shell's environment, and an `.exe` can only change its own
+child process.
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+conda init powershell      # no-op if already initialised
+```
+
+Check it took: `(Get-Command conda).CommandType` should say `Alias`, not
+`Application`. On Linux the equivalent is `conda init bash` and there is no
+policy to change.
+
 ### Point the repo at your data
 
 `configs/paths.yaml` is the only machine-specific file. Set one key:
