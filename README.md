@@ -159,8 +159,66 @@ materialised `.txt` files, so they exercise the whole round trip
 while the converter is wrong; a transposed axis or an off-by-one survives every
 automated check and is obvious here.
 
-`make eda`, `make train` and `make eval` are Tasks 3–5 and currently exit with a
-message saying so.
+## Training and evaluation
+
+```bash
+make train                                        # smoke config
+make train CONFIG=configs/train/fog_yolo11n.yaml  # the real fog run
+make eval  CONFIG=configs/train/fog_yolo11n.yaml SPLIT=test
+make mlflow                                       # UI on outputs/mlruns
+```
+
+| Config | Condition | Images (train/val) | Model | Purpose |
+|---|---|---|---|---|
+| `smoke.yaml` | fog | 200 / 100 (stratified subset) | yolo11n @320, 5 ep, scratch | proves the loop runs, nothing else |
+| `fog_yolo11n.yaml` | fog | 1,953 / 1,953 | yolo11n @640, 100 ep, COCO-pretrained | the real run |
+| `clear_yolo11n.yaml` | clear | 651 / 651 | yolo11n @640, 100 ep, COCO-pretrained | the control arm |
+
+No hyperparameters live in the scripts — the config names the condition, the
+model, the scale and every trainer argument.
+
+**The smoke subset is class-stratified**, by greedy rarest-class-first cover.
+DIOR runs ~62,500 `ship` instances against ~1,000 `trainstation`, so a random
+200-image slice silently drops rare classes and then reports `AP=0` rows that
+mean *"this class was absent"*, not *"the model failed"*. All 20 classes are
+present in the 200/100 subset.
+
+### What lands in MLflow
+
+Metrics and hyperparameters are logged by **Ultralytics' own callback**, not by
+this repo — there is no `mlflow.log_metric` in `src/` or `scripts/`.
+
+| Source | What |
+|---|---|
+| Ultralytics callback | **119 params** — every trainer arg: `lr0`, `momentum`, `weight_decay`, `warmup_*`, `box`/`cls`/`dfl` gains, `optimizer`, augmentation… |
+| Ultralytics callback | **13 metrics/epoch** — `lr/pg{0,1,2}`, `train/{box,cls,dfl}_loss`, `val/{box,cls,dfl}_loss`, `metrics/{mAP50B,mAP50-95B,precisionB,recallB}` |
+| Ultralytics callback | artifacts: `best.pt`, `last.pt`, plots, `results.csv` |
+| `train.py` | **provenance tags** the callback cannot know: `git_commit`, `config`, `condition`, `box_format`, `model_cfg`, `scale`, `gpu`, `torch`, `ultralytics`, plus `seed` and per-split image counts |
+
+`train.py` opens the MLflow run itself and Ultralytics *attaches to the active
+run* rather than starting its own, so both land on one run and nothing is logged
+twice.
+
+### Evaluation outputs
+
+`outputs/eval/<name>/` gets `metrics.json`, `results.md` (overall + per-class
+P/R/AP50/AP50-95) and `predvsgt_*.jpg` — ground truth beside prediction, same
+class colours on both halves so a misclassification reads as a colour change.
+
+Two deliberate choices: `eval.py` **reshapes** Ultralytics' validator output
+rather than recomputing mAP, and asserts its table matches the framework's own
+numbers to 1e-9 before writing. And the qualitative image set is **fixed** —
+seeded, then cached to `outputs/eval/fixed_images_*.json` — so the same images
+appear every run and two checkpoints can be compared by flicking between them.
+Delete the cache file to choose a new set.
+
+> **Metric convention.** Ultralytics reports COCO-style AP (101-point
+> interpolation; mAP50 at IoU 0.50, mAP50-95 over 0.50:0.05:0.95). Most DIOR
+> papers report VOC-style mAP@0.5. `mAP50` here is *close to* but not identical
+> with a published DIOR "mAP", and any table putting them side by side has to
+> say so.
+
+`make eda` is Task 3 and currently exits with a message saying so.
 
 ---
 
