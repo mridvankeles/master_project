@@ -15,17 +15,36 @@ torch==2.9.1+cu128
 torchvision==0.24.1+cu128
 
 # --- Detector -------------------------------------------------------------
-# Ultralytics is NOT installed from PyPI. It is cloned as a sibling of this
-# repo and installed editable, so custom modules can be added later without
-# vendoring a fork (see 04-method-open-questions.md, framework decision).
+# Ultralytics is NOT installed from PyPI. It is cloned as a sibling of this repo
+# and installed editable, so custom modules (the MoE block) can be added later
+# without vendoring a fork (see 04-method-open-questions.md, framework decision).
 #
-#     git clone https://github.com/ultralytics/ultralytics.git ../ultralytics
-#     git -C ../ultralytics checkout 8fbfccb8e6139f4e995f55d1272dc96e66699346
-#     pip install -e ../ultralytics
+#     git clone https://github.com/ultralytics/ultralytics.git ../ultralytics-src
+#     git -C ../ultralytics-src checkout 98a9cfde3119079568620bd43c26bb541c61ac8d
+#     pip install -e ../ultralytics-src --no-deps
 #
-# PINNED COMMIT: 8fbfccb8e6139f4e995f55d1272dc96e66699346  (tag v8.4.115)
-# Resolved with `git ls-remote --tags` on 2026-08-01; `make setup` checks the
-# working tree out to exactly this SHA and will fail loudly if it drifts.
+# PINNED COMMIT: 98a9cfde3119079568620bd43c26bb541c61ac8d   (tag v8.4.115)
+#
+# Two traps, both hit and fixed rather than theoretical:
+#
+# 1. `git ls-remote --tags` returns 8fbfccb8e6139f4e995f55d1272dc96e66699346 for
+#    v8.4.115, but that is the ANNOTATED TAG OBJECT, not a commit. `git checkout`
+#    peels it to the commit above, so checking it out works — but `git log` on it
+#    does not, and calling it "the commit" is wrong. The commit sha is pinned here.
+#
+# 2. The clone directory is `ultralytics-src`, NOT `ultralytics`. A directory
+#    named `ultralytics` sitting next to the repo shadows the installed package
+#    for any python started from that parent directory (cwd comes first on
+#    sys.path, and the clone root is importable as a namespace package with no
+#    __version__). Renaming it removes the failure mode entirely.
+#
+# --no-deps keeps pip from re-resolving torch. Ultralytics' own runtime deps are
+# therefore pinned explicitly below.
+filelock==3.20.0
+psutil==7.1.3
+polars==1.35.2
+nvidia-ml-py==13.580.126
+ultralytics-thop==2.1.6
 
 # --- Experiment tracking --------------------------------------------------
 # Driven entirely through Ultralytics' built-in MLflow callback:

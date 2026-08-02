@@ -1,0 +1,35 @@
+# SMOKE CONFIG — proves the loop runs. Proves nothing about accuracy.
+#
+# Small class-stratified subset, yolo11n, low resolution, few epochs. Expect bad
+# numbers; the point is that losses decrease, MLflow receives metrics, and
+# checkpoints land on disk.
+
+run_name: smoke
+experiment: dior-hbb-smoke
+condition: fog # which configs/data/dior_<condition>.yaml to train on
+seed: 0
+
+# Class-stratified subset (src/data/subset.py). Omit `subset:` for the full split.
+subset:
+  train: 200
+  val: 100
+
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n # -> yolo11n
+
+# Ultralytics trainer arguments. Passed through verbatim; the MLflow callback
+# logs this whole dict as run parameters.
+train:
+  epochs: 5
+  imgsz: 320
+  batch: 16
+  device: 0 # RTX 5070 Ti
+  workers: 4
+  optimizer: auto
+  patience: 100
+  cos_lr: false
+  pretrained: false # from scratch: a smoke test should exercise the real path
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true

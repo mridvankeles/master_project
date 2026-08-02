@@ -1,0 +1,34 @@
+# Clear condition, full aligned split, yolo11n. The control arm.
+#
+# Train 651 / val 651 / test 1,305 images. One third the size of the fog config
+# because clear has no severity variants — the same 651 DIOR ids, once each.
+#
+# NOTE FOR THE THESIS: this is NOT "the DIOR baseline". Published DIOR numbers
+# train on 5,862 images; this trains on 651, because only 2,607 of the 23,463
+# DIOR ids survive the Hazy-DIOR release with their filename intact (see the
+# pairing report). Quoting this against published DIOR mAP would be dishonest.
+# The full-scale clear run is blocked on downloading clear DIOR and recovering
+# the train/val id mapping.
+
+run_name: clear_yolo11n
+experiment: dior-hbb
+condition: clear
+seed: 0
+
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: true
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true

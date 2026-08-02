@@ -1,0 +1,31 @@
+# Fog condition, full aligned split, yolo11n.
+#
+# Train 1,953 / val 1,953 / test 3,915 images (651 unique DIOR ids per split,
+# times three haze severities). Splits come from DIOR ImageSets/Main.
+#
+# `pretrained: true` starts from COCO weights. State this in the thesis — it is a
+# transfer-learning result, not from-scratch, and with 1,953 training images it
+# is the only sane choice. Set it false for the from-scratch ablation.
+
+run_name: fog_yolo11n
+experiment: dior-hbb
+condition: fog
+seed: 0
+
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640 # native DIOR resolution is 800; 640 is the Ultralytics default
+  batch: 16 # fits comfortably in 16 GB at yolo11n/640
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: true
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true

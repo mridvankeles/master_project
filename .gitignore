@@ -23,6 +23,7 @@ runs/
 
 # --- vendored, editable-installed Ultralytics -------------------------------
 # cloned as a sibling of this repo by `make setup`; never committed here
+/ultralytics-src/
 /ultralytics/
 
 # --- python -----------------------------------------------------------------
