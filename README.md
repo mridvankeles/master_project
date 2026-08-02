@@ -111,7 +111,12 @@ policy to change.
 
 ### Point the repo at your data
 
-`configs/paths.yaml` is the only machine-specific file. Set one key:
+`configs/paths.yaml` is the only machine-specific file, and it is **gitignored**
+— each machine keeps its own. Copy the template and edit one key:
+
+```bash
+cp configs/paths.example.yaml configs/paths.yaml
+```
 
 ```yaml
 hazy_dior_root: C:/Users/Ridvan/Desktop/tez/NIR-Net_hazyDior/Hazy-DIOR

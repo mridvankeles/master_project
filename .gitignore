@@ -9,6 +9,12 @@
 # machines run `make data`. Everything else under configs/ IS version-controlled.
 /configs/data/dior_*.yaml
 
+# --- machine-specific paths --------------------------------------------------
+# Each machine points at its own copy of the Hazy-DIOR release. Tracking this
+# guarantees a conflict every time the other machine runs make data.
+# configs/paths.example.yaml is the template; copy it and edit one key.
+/configs/paths.yaml
+
 # --- run artefacts ----------------------------------------------------------
 /outputs/
 mlruns/
