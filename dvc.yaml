@@ -14,6 +14,20 @@
 # guard people delete.
 
 stages:
+  recover_ids:
+    cmd: python scripts/recover_ids.py
+    desc: >
+      Recover DIOR ids and haze severities for the renumbered train/ and val/
+      subtrees by decoded-pixel hash against the clear DIOR release. Lifts the
+      fog condition from 2,607 ids to ~23,385. Costs ~25 minutes, which is why
+      the mapping is a cached artefact rather than part of `prepare`.
+    deps:
+      - configs/paths.yaml
+      - scripts/recover_ids.py
+      - src/data/recovery.py
+    outs:
+      - data/hazy_dior_id_map.json
+
   prepare:
     cmd: python scripts/prepare_dataset.py
     desc: >
@@ -29,6 +43,25 @@ stages:
       - src/data/voc_hbb.py
     outs:
       - data/dior_hbb
+
+  prepare_full:
+    cmd: python scripts/prepare_dataset.py --scope full
+    desc: >
+      The same conversion over ALL 23,463 DIOR ids: clear from the official DIOR
+      release, fog from the release's test/ subtree plus the recovered train/
+      and val/ subtrees. This is the corpus Gate 1 and the interference matrix
+      run on; `prepare` above remains the 2,607-id build the early results used.
+    deps:
+      - configs/paths.yaml
+      - scripts/prepare_dataset.py
+      - src/data/build_dataset.py
+      - src/data/dior_classes.py
+      - src/data/pairing.py
+      - src/data/recovery.py
+      - src/data/voc_hbb.py
+      - data/hazy_dior_id_map.json
+    outs:
+      - data/dior_hbb_full
 
   verify:
     cmd: python scripts/render_verification.py

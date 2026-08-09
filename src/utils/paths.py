@@ -24,12 +24,22 @@ DEFAULT_PATHS_YAML = CONFIG_DIR / "paths.yaml"
 
 @dataclass(frozen=True)
 class SourcePaths:
-    """Resolved locations inside the read-only Hazy-DIOR release.
+    """Resolved locations inside the read-only source releases.
 
     Nothing in this project writes into these directories.
+
+    Two releases, with different roles:
+
+    * `hazy_dior_root` — the Hazy-DIOR release. Supplies the fog imagery, and
+      also carries DIOR's annotations and split lists (verified byte-identical
+      to the official ones).
+    * `dior_root` — the official DIOR release. Supplies CLEAR imagery for all
+      23,463 ids. Optional, because the aligned-scope build predates it and
+      still works without it; required for `scope="full"`.
     """
 
     hazy_dior_root: Path
+    dior_root: Path | None = None
 
     @property
     def annotations_hbb(self) -> Path:
@@ -75,6 +85,55 @@ class SourcePaths:
             raise ValueError(f"unaligned splits are train/val, got {split!r}")
         return self.images_root / split
 
+    # --- official DIOR release ------------------------------------------
+    # The Hazy-DIOR release carries clear imagery for only the 2,607 aligned
+    # ids (`aligned_clear_root`). These give the other 20,856.
+
+    @property
+    def dior_images_trainval(self) -> Path:
+        """DIOR ids 00001-11725. Split membership comes from ImageSets, not here."""
+        if self.dior_root is None:
+            raise ValueError("dior_root is not configured; add it to configs/paths.yaml")
+        return self.dior_root / "JPEGImages-trainval"
+
+    @property
+    def dior_images_test(self) -> Path:
+        """DIOR ids 11726-23463."""
+        if self.dior_root is None:
+            raise ValueError("dior_root is not configured; add it to configs/paths.yaml")
+        return self.dior_root / "JPEGImages-test"
+
+    def dior_image(self, image_id: str) -> Path | None:
+        """Clear image for a DIOR id, or None if absent.
+
+        The release splits its imagery across two directories by id range, but
+        that division is a packaging detail and carries no split meaning — the
+        detection split is `ImageSets/Main`. So this looks in both rather than
+        computing which one to use from the id.
+        """
+        if self.dior_root is None:
+            return None
+        for directory in (self.dior_images_trainval, self.dior_images_test):
+            candidate = directory / f"{image_id}.jpg"
+            if candidate.exists():
+                return candidate
+        return None
+
+    # --- renumbered Hazy-DIOR subtrees ----------------------------------
+
+    def renumbered_root(self, split: str, condition: str) -> Path:
+        """`train/`|`val/` x `gt`|`haze` — sequentially numbered, DIOR id absent.
+
+        These are the subtrees `pairing.py` documents as unusable: filenames are
+        indices, not DIOR ids. `src/data/recovery.py` recovers the mapping by
+        pixel hash, which is what makes them usable after all.
+        """
+        if split not in {"train", "val"}:
+            raise ValueError(f"renumbered subtrees are train/val, got {split!r}")
+        if condition not in {"gt", "haze"}:
+            raise ValueError(f"condition must be gt|haze, got {condition!r}")
+        return self.images_root / split / condition
+
     def validate(self) -> list[str]:
         """Return a list of human-readable problems; empty means all good."""
         problems: list[str] = []
@@ -87,6 +146,14 @@ class SourcePaths:
         ]:
             if not path.exists():
                 problems.append(f"{label}: does not exist -> {path}")
+        if self.dior_root is not None:
+            for label, path in [
+                ("dior_root", self.dior_root),
+                ("dior_images_trainval", self.dior_images_trainval),
+                ("dior_images_test", self.dior_images_test),
+            ]:
+                if not path.exists():
+                    problems.append(f"{label}: does not exist -> {path}")
         return problems
 
 
@@ -104,21 +171,32 @@ def load_paths(config: str | Path | None = None) -> SourcePaths:
     if "hazy_dior_root" not in raw:
         raise KeyError(f"{config}: missing required key 'hazy_dior_root'")
 
-    root = Path(raw["hazy_dior_root"]).expanduser()
-    if not root.is_absolute():
-        root = (REPO_ROOT / root).resolve()
+    def _resolve(value: str) -> Path:
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else (REPO_ROOT / path).resolve()
 
-    return SourcePaths(hazy_dior_root=root)
+    dior_root = raw.get("dior_root")
+    return SourcePaths(
+        hazy_dior_root=_resolve(raw["hazy_dior_root"]),
+        # Optional: the aligned-scope build predates the DIOR download and does
+        # not need it. `scope="full"` does, and says so.
+        dior_root=_resolve(dior_root) if dior_root else None,
+    )
 
 
-def dataset_root(task: str = "detect") -> Path:
+def dataset_root(task: str = "detect", scope: str = "aligned") -> Path:
     """Where `prepare_dataset` materialises the Ultralytics-format corpus.
 
     HBB and OBB get separate roots. Sharing one would let an oriented label be
     handed to a detect model (or the reverse), which trains without complaint
     and reports nonsense.
+
+    Scope gets a separate root for the same reason: the aligned corpus (2,607
+    ids) and the full one (~23,385) are different datasets, and a run that
+    silently switched between them would be uncomparable to its own history.
     """
-    return DATA_DIR / ("dior_hbb" if task == "detect" else "dior_obb")
+    base = "dior_hbb" if task == "detect" else "dior_obb"
+    return DATA_DIR / (base if scope == "aligned" else f"{base}_{scope}")
 
 
 def ensure_dir(path: Path) -> Path:

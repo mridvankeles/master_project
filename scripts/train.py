@@ -35,6 +35,11 @@ from src.utils.config import RunConfig, load_run_config  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.paths import OUTPUT_DIR, REPO_ROOT, dataset_root, ensure_dir  # noqa: E402
 from src.utils.seed import git_commit, seed_everything  # noqa: E402
+from src.utils.tracking import (  # noqa: E402
+    dataset_fingerprint,
+    model_complexity,
+    model_fingerprint,
+)
 
 log = get_logger("train")
 
@@ -44,8 +49,11 @@ RUNS_DIR = OUTPUT_DIR / "runs"
 
 def build_subset_data_yaml(cfg: RunConfig) -> Path:
     """Write class-stratified train/val image lists plus a data yaml for them."""
-    root = dataset_root(cfg.task) / cfg.condition
-    out_dir = ensure_dir(dataset_root(cfg.task) / "subsets")
+    # `cfg.dataset_root`, not `dataset_root(cfg.task)`: the latter ignores scope
+    # and silently resolves to the 2,607-id aligned corpus, so a run configured
+    # for `scope: full` would train on 651 images while its logs claimed 5,862.
+    root = cfg.dataset_root / cfg.condition
+    out_dir = ensure_dir(cfg.dataset_root / "subsets")
 
     lists: dict[str, Path] = {}
     for split, n in (cfg.subset or {}).items():
@@ -166,19 +174,55 @@ def main() -> int:
                 "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
             }
         )
+        # Ultralytics logs `data` and `model` as PATHS. A path is not identity —
+        # see dataset_fingerprint's docstring. These digests are what make two
+        # runs comparable, or provably not.
         mlflow.log_params(
-            {"seed": cfg.seed, **{f"n_images_{k}": v for k, v in counts.items()}}
+            {
+                "seed": cfg.seed,
+                **{f"n_images_{k}": v for k, v in counts.items()},
+                **dataset_fingerprint(data_yaml),
+            }
         )
         mlflow.log_artifact(str(cfg.path))
         mlflow.log_artifact(str(cfg.model_path))
 
+        # An MoE run needs the auxiliary loss and utilisation logging, which
+        # live in a DetectionTrainer subclass. Selected by the config's `moe:`
+        # block so a stock run and an MoE run differ by configuration only.
+        trainer_cls = None
+        if cfg.moe:
+            from src.models.moe_trainer import MoEDetectionTrainer
+
+            trainer_cls = MoEDetectionTrainer
+            train_args.update(
+                moe_lambda=cfg.moe.get("lambda", 0.01),
+                moe_aux=cfg.moe.get("aux", "entropy"),
+            )
+            mlflow.log_params({f"moe_{k}": v for k, v in cfg.moe.items()})
+            log.info("MoE run: %s", cfg.moe)
+
         model = YOLO(str(cfg.scaled_model()), task=cfg.task)
+
+        # Parameter count and GFLOPs. Ultralytics' callback logs `trainer.args`
+        # but never the model's size, and `06-moe-design-guide.md` §5 requires
+        # complexity to be reported next to accuracy. It also becomes the check
+        # that an MoE block actually landed: if adding experts does not move
+        # n_parameters, the edit went into the wrong Ultralytics copy.
+        mlflow.log_params(model_fingerprint(cfg.model_path))
+        # Metrics, not params: MLflow stores params as strings, so a parameter
+        # count logged as a param cannot be plotted against mAP.
+        mlflow.log_metrics(
+            model_complexity(model, imgsz=cfg.train.get("imgsz", 640)), step=0
+        )
+
         model.train(
             data=str(data_yaml),
             project=str(RUNS_DIR),
             name=cfg.run_name,
             exist_ok=True,
             seed=cfg.seed,
+            **({"trainer": trainer_cls} if trainer_cls else {}),
             **train_args,
         )
 

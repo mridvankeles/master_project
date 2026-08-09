@@ -29,8 +29,16 @@ class RunConfig:
     model: str
     scale: str
     task: str = "detect"
+    # Which materialised corpus this run consumes. "aligned" is the 2,607-id
+    # build; "full" is the ~23,385-id one. Named in the config because it is a
+    # property of the experiment, not of the machine.
+    scope: str = "aligned"
     train: dict[str, Any] = field(default_factory=dict)
     subset: dict[str, int] | None = None
+    # Present only for MoE runs: {"lambda": 0.01, "aux": "entropy", ...}.
+    # Its presence is what selects the MoE trainer, so a stock run and an MoE
+    # run differ by configuration rather than by code path.
+    moe: dict[str, Any] | None = None
 
     @property
     def model_path(self) -> Path:
@@ -45,7 +53,14 @@ class RunConfig:
         an oriented label can never reach a detect model or the reverse.
         """
         suffix = "" if self.task == "detect" else "_obb"
-        return CONFIG_DIR / "data" / f"dior_{self.condition}{suffix}.yaml"
+        scope = "" if self.scope == "aligned" else f"_{self.scope}"
+        return CONFIG_DIR / "data" / f"dior_{self.condition}{suffix}{scope}.yaml"
+
+    @property
+    def dataset_root(self) -> Path:
+        from .paths import dataset_root
+
+        return dataset_root(self.task, self.scope)
 
     def scaled_model(self) -> Path:
         """Insert the scale letter Ultralytics expects: yolo11_x.yaml -> yolo11n_x.yaml.
@@ -78,6 +93,10 @@ def load_run_config(path: str | Path) -> RunConfig:
     if task not in {"detect", "obb"}:
         raise ValueError(f"{path}: task must be 'detect' or 'obb', got {task!r}")
 
+    scope = raw.get("scope", "aligned")
+    if scope not in {"aligned", "full"}:
+        raise ValueError(f"{path}: scope must be 'aligned' or 'full', got {scope!r}")
+
     return RunConfig(
         path=path,
         run_name=raw["run_name"],
@@ -87,6 +106,8 @@ def load_run_config(path: str | Path) -> RunConfig:
         model=raw["model"],
         scale=raw["scale"],
         task=task,
+        scope=scope,
         train=dict(raw.get("train") or {}),
         subset=raw.get("subset"),
+        moe=raw.get("moe"),
     )

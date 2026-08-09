@@ -11,6 +11,15 @@ Outputs land in outputs/eval/<name>/:
 The metrics come from Ultralytics' own validator — we reshape them, we do not
 recompute them. A hand-rolled mAP that disagrees with the framework's is a
 liability rather than a contribution.
+
+MLFLOW
+------
+Unlike training, evaluation metrics are logged FROM THIS SCRIPT. Ultralytics'
+MLflow callback registers trainer hooks only, so a standalone `model.val()`
+fires nothing — see `src/utils/tracking.py`. Each evaluation opens its own run
+(tagged `kind=eval`, linked to the training run by `source_run`) carrying
+overall metrics, per-class AP, VOC07 11-point mAP, speed and model complexity.
+Pass `--no-mlflow` to write only the files.
 """
 
 from __future__ import annotations
@@ -30,6 +39,14 @@ from src.utils.config import load_run_config  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.paths import OUTPUT_DIR, dataset_root, ensure_dir  # noqa: E402
 from src.utils.seed import git_commit, seed_everything  # noqa: E402
+from src.utils.tracking import (  # noqa: E402
+    dataset_fingerprint,
+    evaluation_metrics,
+    file_digest,
+    log_evaluation,
+    model_complexity,
+    model_fingerprint,
+)
 
 log = get_logger("eval")
 
@@ -134,6 +151,9 @@ def main() -> int:
     parser.add_argument("--config", default=None, help="config to infer checkpoint/condition from")
     parser.add_argument("--split", default="val", choices=["train", "val", "test"])
     parser.add_argument("--imgsz", type=int, default=None)
+    parser.add_argument("--batch", type=int, default=16,
+                        help="validation batch size; pinned because the speed protocol in "
+                             "04-method-open-questions.md requires it to be stated")
     parser.add_argument("--device", default="0")
     parser.add_argument("--conf", type=float, default=0.25, help="confidence for the panels only")
     parser.add_argument("--seed", type=int, default=0)
@@ -143,6 +163,10 @@ def main() -> int:
 
     parser.add_argument("--skip-voc07", action="store_true",
                         help="skip the VOC07 pass (it re-runs inference over the split)")
+    parser.add_argument("--experiment", default=None,
+                        help="MLflow experiment; defaults to the config's, else 'dior-eval'")
+    parser.add_argument("--no-mlflow", action="store_true",
+                        help="write the files but do not open an MLflow run")
     args = parser.parse_args()
 
     seed_everything(args.seed)
@@ -182,6 +206,7 @@ def main() -> int:
         data=str(data_yaml),
         split=args.split,
         imgsz=imgsz,
+        batch=args.batch,
         device=args.device,
         plots=True,
         project=str(out_dir),
@@ -217,7 +242,11 @@ def main() -> int:
         return 1
 
     # --- VOC07 11-point mAP@0.5, the convention NIRNet reports ------------
-    images_dir = dataset_root(task) / condition / "images" / args.split
+    # Scope-aware: the aligned and full corpora live under different roots, so
+    # reconstructing this from `task` alone would silently score the wrong one.
+    root = cfg.dataset_root if cfg else dataset_root(task)
+    images_dir = root / condition / "images" / args.split
+    voc = None  # stays None when the pass is skipped; the tracker treats that as "not measured"
     if images_dir.is_dir() and not args.skip_voc07:
         log.info("computing VOC07 11-point mAP@0.5 over %s ...", args.split)
         dets, gts = collect_for_voc07(model, images_dir, task, imgsz, args.device, args.voc07_conf)
@@ -267,6 +296,71 @@ def main() -> int:
         log.info("rendered %d pred-vs-GT panels (conf=%.2f)", len(summary), args.conf)
     else:
         log.warning("no images at %s — skipping panels", images_dir)
+
+    # --- tracking ---------------------------------------------------------
+    # Ultralytics' MLflow callback hooks the TRAINER only, so nothing above this
+    # point has reached the tracker. See src/utils/tracking.py for the details.
+    if not args.no_mlflow:
+        import torch
+        import ultralytics
+
+        source_run = checkpoint.parent.parent.name
+        experiment = args.experiment or (cfg.experiment if cfg else "dior-eval")
+        n_images = (
+            len([p for p in images_dir.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}])
+            if images_dir.is_dir()
+            else 0
+        )
+
+        metrics = evaluation_metrics(report, voc, args.split)
+        metrics.update(model_complexity(model, imgsz=imgsz))
+
+        run_id = log_evaluation(
+            tracking_uri=os.environ["MLFLOW_TRACKING_URI"],
+            experiment=experiment,
+            run_name=f"eval-{name}-{report.git_commit}",
+            tags={
+                "kind": "eval",
+                "source_run": source_run,
+                "eval_condition": condition,
+                # Heuristic on the run-name convention (`<condition>_<model>`),
+                # recorded so a cross-condition evaluation — a clear-trained
+                # model scored on fog — is visible in the run table rather than
+                # inferable only from the two tags above.
+                "cross_condition": str(not source_run.startswith(condition)).lower(),
+                "split": args.split,
+                "task": task,
+                "box_format": "hbb" if task == "detect" else "obb",
+                "git_commit": report.git_commit,
+                "metric_convention": report.metric_convention,
+                "voc07_measured": str(voc is not None).lower(),
+                "ultralytics": ultralytics.__version__,
+                "torch": torch.__version__,
+                "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+            },
+            params={
+                "checkpoint": checkpoint,
+                # Which weights, exactly. Two checkpoints at the same path after
+                # a re-run are otherwise indistinguishable in the run table.
+                "checkpoint_sha": file_digest(checkpoint),
+                "split": args.split,
+                "imgsz": imgsz,
+                # Batch composition changes measured throughput — 06 §3.4 warns
+                # that a condition-sorted batch and a mixed batch give different
+                # numbers once routing is sparse. Record the conditions of the
+                # measurement, not just its result.
+                "batch": args.batch,
+                "device": args.device,
+                "panel_conf": args.conf,
+                "voc07_conf": args.voc07_conf,
+                f"n_images_{args.split}": n_images,
+                **dataset_fingerprint(data_yaml),
+                **model_fingerprint(cfg.model_path if cfg else None),
+            },
+            metrics=metrics,
+            artifacts=[out_dir],
+        )
+        log.info("mlflow run %s  experiment=%s", run_id, experiment)
 
     log.info("wrote %s", out_dir)
     return 0

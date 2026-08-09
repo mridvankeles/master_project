@@ -7,3 +7,13 @@
 #
 # The release nests a second `Hazy-DIOR/` inside the first; point at the OUTER one.
 hazy_dior_root: /path/to/Hazy-DIOR
+
+# `dior_root` is the official DIOR release, and must directly contain:
+#     JPEGImages-trainval/
+#     JPEGImages-test/
+#     Annotations/{Horizontal,Oriented} Bounding Boxes/
+#     ImageSets/Main/
+#
+# Optional. Hazy-DIOR carries clear imagery for only the 2,607 aligned ids, so
+# this is what makes `--scope full` (all 23,463) possible.
+dior_root: /path/to/DIOR
