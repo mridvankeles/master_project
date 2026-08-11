@@ -64,6 +64,23 @@ PLAN: list[tuple[str, str, str, bool]] = [
     ("moe_neck_yolo11n", "union_full_yolo11n", "moe_neck_on_union", False),
     ("moe_neck_yolo11n", "clear_full_yolo11n", "moe_neck_on_clear", False),
     ("moe_neck_yolo11n", "fog_full_yolo11n", "moe_neck_on_fog", False),
+    # --- three-condition arms (clear / fog / night) ------------------------
+    ("union3_full_yolo11n", "union3_full_yolo11n", "union3_on_union3", False),
+    ("union3_full_yolo11n", "clear_full_yolo11n", "union3_on_clear", False),
+    ("union3_full_yolo11n", "fog_full_yolo11n", "union3_on_fog", False),
+    ("union3_full_yolo11n", "night_full_yolo11n", "union3_on_night", False),
+    ("moe3_neck_yolo11n", "union3_full_yolo11n", "moe3_on_union3", False),
+    ("moe3_neck_yolo11n", "clear_full_yolo11n", "moe3_on_clear", False),
+    ("moe3_neck_yolo11n", "fog_full_yolo11n", "moe3_on_fog", False),
+    ("moe3_neck_yolo11n", "night_full_yolo11n", "moe3_on_night", False),
+    ("night_full_yolo11n", "night_full_yolo11n", "night_on_night", False),
+    ("night_full_yolo11n", "clear_full_yolo11n", "night_on_clear", False),
+    # --- NWD box loss: isolated, then composed with routing ----------------
+    ("union_nwd_yolo11n", "union_full_yolo11n", "union_nwd_on_union", False),
+    ("union_nwd_yolo11n", "clear_full_yolo11n", "union_nwd_on_clear", False),
+    ("union_nwd_yolo11n", "fog_full_yolo11n", "union_nwd_on_fog", False),
+    ("moe_neck_nwd_yolo11n", "union_full_yolo11n", "moe_neck_nwd_on_union", False),
+    ("moe_neck_nwd_yolo11n", "clear_full_yolo11n", "moe_neck_nwd_on_clear", False),
 ]
 
 

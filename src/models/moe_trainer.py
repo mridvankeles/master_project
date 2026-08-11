@@ -48,6 +48,13 @@ class MoEDetectionTrainer(DetectionTrainer):
         overrides = dict(overrides or {})
         self.moe_lambda = float(overrides.pop("moe_lambda", 0.01))
         self.moe_aux = str(overrides.pop("moe_aux", "entropy"))
+        # Box-loss selection. Independent of the MoE: a run may use NWD with a
+        # stock model, or an MoE with the stock box loss, and the two effects
+        # have to be separable in the results table.
+        self.nwd_mode = str(overrides.pop("nwd", "off"))
+        self.nwd_c = float(overrides.pop("nwd_c", 12.8))
+        self.nwd_tiny_area = float(overrides.pop("nwd_tiny_area", 32.0**2))
+        self._nwd_installed = False
         self._epoch_shares: dict[str, float] = defaultdict(float)
         self._epoch_batches = 0
         self._last_aux = 0.0
@@ -58,34 +65,57 @@ class MoEDetectionTrainer(DetectionTrainer):
         model = super().get_model(cfg=cfg, weights=weights, verbose=verbose)
         blocks = moe_blocks(model)
         LOGGER.info(
-            f"MoE trainer: {len(blocks)} block(s), lambda={self.moe_lambda}, aux={self.moe_aux}"
+            f"MoE trainer: {len(blocks)} block(s), lambda={self.moe_lambda}, "
+            f"aux={self.moe_aux}, nwd={self.nwd_mode}"
         )
-        if self.moe_lambda == 0 or not blocks:
-            LOGGER.warning("MoE trainer: auxiliary loss NOT installed")
+        use_aux = self.moe_lambda != 0 and bool(blocks)
+        if not use_aux and self.nwd_mode == "off":
+            LOGGER.warning("MoE trainer: neither auxiliary loss nor NWD is active")
             return model
 
         inner_loss = model.loss  # bound method; instance attribute will shadow it
 
         def loss_with_aux(batch, preds=None):
+            # The criterion is built lazily on the first loss call and is
+            # reassigned during setup, so NWD can only be swapped in here --
+            # doing it earlier would be silently undone.
+            if not self._nwd_installed and self.nwd_mode != "off":
+                from .nwd import install_nwd
+
+                total_first, items_first = inner_loss(batch, preds)
+                ok = install_nwd(model, c=self.nwd_c,
+                                 tiny_area=self.nwd_tiny_area, mode=self.nwd_mode)
+                self._nwd_installed = True
+                LOGGER.info(f"NWD box loss installed: {ok} (mode={self.nwd_mode})")
+                if not ok:
+                    LOGGER.error("NWD requested but the criterion had no bbox_loss")
+                return self._finish(model, total_first, items_first, use_aux)
+
             total, items = inner_loss(batch, preds)
-            aux = routing_aux_loss(model, mode=self.moe_aux)
-            if isinstance(aux, torch.Tensor):
-                self._last_aux = float(aux.detach())
-                term = self.moe_lambda * aux
-                # The loop does `self.loss = loss.sum()`, so a scalar added to a
-                # vector-valued loss would be counted once per component. Add it
-                # to a single element instead, leaving `items` (what gets
-                # displayed as box/cls/dfl) untouched.
-                if isinstance(total, torch.Tensor) and total.ndim > 0:
-                    total = total.clone()
-                    total[0] = total[0] + term
-                else:
-                    total = total + term
-            self._accumulate(model)
-            return total, items
+            return self._finish(model, total, items, use_aux)
 
         model.loss = loss_with_aux
         return model
+
+    def _finish(self, model, total, items, use_aux: bool):
+        """Add the routing auxiliary term and record utilisation."""
+        if not use_aux:
+            return total, items
+        aux = routing_aux_loss(model, mode=self.moe_aux)
+        if isinstance(aux, torch.Tensor):
+            self._last_aux = float(aux.detach())
+            term = self.moe_lambda * aux
+            # The loop does `self.loss = loss.sum()`, so a scalar added to a
+            # vector-valued loss would be counted once per component. Add it to a
+            # single element instead, leaving `items` (what gets displayed as
+            # box/cls/dfl) untouched.
+            if isinstance(total, torch.Tensor) and total.ndim > 0:
+                total = total.clone()
+                total[0] = total[0] + term
+            else:
+                total = total + term
+        self._accumulate(model)
+        return total, items
 
     def save_model(self):
         """Save with the loss wrapper detached.

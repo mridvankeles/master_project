@@ -1,0 +1,32 @@
+# Dense control for the three-condition corpus (clear+fog+night).
+#
+# Matched to its control in every training hyperparameter: same data, epochs,
+# batch, schedule, seed and pretrained weights. Only the lines noted below differ.
+
+run_name: union3_full_yolo11n
+experiment: dior-hbb-full
+condition: union3
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000

@@ -1,0 +1,37 @@
+# Dense + size-gated NWD box loss. Isolates the loss from the routing.
+#
+# Matched to its control in every training hyperparameter: same data, epochs,
+# batch, schedule, seed and pretrained weights. Only the lines noted below differ.
+
+run_name: union_nwd_yolo11n
+experiment: dior-hbb-full
+condition: union
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000
+
+loss:
+  nwd: gated          # size-gated CIoU/NWD blend; see src/models/nwd.py
+  nwd_c: 12.8
+  tiny_area: 1024     # 32^2, COCO's small-object threshold

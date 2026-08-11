@@ -15,8 +15,8 @@ BALANCE
 Fog carries three severities per id, so pooling everything would give a corpus
 that is ~75% fog. A router trained on that has a strong prior before it has
 learned anything, and the dense baseline sees a condition mix no one chose.
-Train and val are therefore sampled 50/50 by condition, with fog's share spread
-evenly across the three severities.
+Train and val are therefore sampled evenly across the requested conditions,
+with fog's share spread evenly across its three severities.
 
 TEST IS NEVER SUBSAMPLED OR BALANCED. It is every clear test image plus every
 fog test image, because a test set is supposed to be the population, not a
@@ -110,6 +110,8 @@ def main() -> int:
     parser.add_argument("--task", default="detect", choices=["detect", "obb"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out-condition", default="union")
+    parser.add_argument("--conditions", nargs="+", default=["clear", "fog"],
+                        help="conditions to pool; the budget is split evenly across them")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -128,9 +130,9 @@ def main() -> int:
             stale.unlink()
 
         budget = BUDGET[split]
-        per_condition = None if budget is None else budget // 2
+        per_condition = None if budget is None else budget // len(args.conditions)
 
-        for condition in ("clear", "fog"):
+        for condition in args.conditions:
             src_dir = root / condition / "images" / split
             available = [p for p in src_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS]
             chosen = (

@@ -1,86 +1,158 @@
-"""Synthetic degradation. STUB — nothing is implemented here yet.
+"""Synthetic low-illumination degradation for the third condition.
 
-Per the standing rules for this scaffold: no degradation synthesis. This module
-exists so the shape of the eventual work is recorded next to the code it will
-live beside, not so it can be called.
+Fog is supplied ready-made by the Hazy-DIOR release. Night must be synthesised,
+and — this is the point, not a detail — synthesised on **the same DIOR images**.
+`03-datasets.md` Risk 2: if fog came from one corpus and darkness from another,
+a router could separate the conditions on platform statistics alone (ground
+sampling distance, object density, viewing geometry) and never learn anything
+about illumination. Same source images makes that impossible.
 
-WHAT GOES HERE
---------------
-The low-illumination condition of the three-condition grid in `03-datasets.md`.
-The Fog condition is supplied ready-made by the Hazy-DIOR release; Dark must be
-synthesised on the *same* DIOR images, which is the whole point — it is what
-controls the platform confound described in `03-datasets.md` Risk 2. If fog came
-from satellite imagery and darkness from drone imagery, a router could separate
-the two conditions on ground-sampling-distance statistics alone and never learn
-anything about illumination.
-
+THE MODEL
+---------
 `03-datasets.md` is explicit that this must be a citable physical model rather
-than a gamma hack:
+than a gamma hack, because an examiner who knows imaging will notice. So the
+pipeline runs backwards through the camera and forwards again:
 
-  1. Inverse ISP. Undo the camera pipeline back to a linear sensor-space signal
-     (inverse tone curve, inverse gamma, inverse white balance), scale exposure
-     down there, then re-apply the forward pipeline. Darkening in sRGB space
-     instead produces the wrong noise and colour behaviour, and an examiner who
-     knows imaging will notice.
-  2. Poisson-Gaussian sensor noise on the darkened linear signal: Poisson for
-     photon shot noise (signal-dependent), Gaussian for read noise
-     (signal-independent). This is the standard sensor model in the low-light
-     literature, and it is what makes the darkened images genuinely harder
-     rather than merely dimmer.
+    sRGB  --inverse gamma-->  linear radiance
+          --x exposure----->  fewer photons
+          --Poisson--------->  shot noise (signal dependent)
+          --+Gaussian------->  read noise (signal independent)
+          --quantise-------->  sensor bit depth
+          --forward gamma-->  sRGB
 
-PARAMETERS MUST BE RANDOMISED PER SAMPLE
-----------------------------------------
-Not per-dataset, not per-split — per image. `04-method-open-questions.md`
-§ Router domain robustness calls this "the single highest-value line of code in
-the project": a router trained on one fixed simulator setting learns that
-setting, whereas a router trained across a distribution of exposure and noise
-parameters has to learn the degradation itself.
+Two properties fall out of doing it this way rather than scaling sRGB directly:
 
-`05-experiment-plan.md` § Leakage checklist adds the constraint that the
-parameter distribution must be sampled per-split and never fitted on the full
-dataset.
+* **Noise grows as the signal shrinks.** Photon shot noise is Poisson, so its
+  relative magnitude scales as 1/sqrt(signal). Darkening in sRGB space keeps the
+  noise floor fixed and produces an image that is merely dim — visually similar,
+  but a far easier detection problem, and wrong in a way that would flatter the
+  results.
+* **Colour behaves correctly.** Per-channel gains applied in linear space model
+  the white-balance shift of low light; applied in sRGB they distort hue.
 
-STILL UNDECIDED — do not resolve these in code
-----------------------------------------------
-`03-datasets.md` open question 2 asks which parameterisation is used and whether
-the parameters are held fixed between train and test. That is a design decision,
-not an implementation detail, and it is unanswered.
+PARAMETERS ARE RANDOMISED PER IMAGE
+-----------------------------------
+`04-method-open-questions.md` calls this "the single highest-value line of code
+in the project": a router trained on one fixed simulator setting learns the
+setting, not the degradation. Every image samples its own exposure, read-noise
+level, ISO gain and white-balance shift, deterministically seeded by image id so
+the corpus is reproducible without storing the parameters.
 
-The compound fog+dark condition (`03-datasets.md`, "the money experiment") is
-also generated here eventually, and is TEST-ONLY. It must never reach a training
-split.
+This also fixes a known weakness of the fog condition, which ships only three
+fixed severities (`results-full-scale-and-moe.md` § limitations).
 """
 
 from __future__ import annotations
 
+import hashlib
+from dataclasses import asdict, dataclass
+
 import numpy as np
 
-__all__ = ["synthesize_low_light"]
+__all__ = ["NightParams", "sample_night_params", "apply_night", "SRGB_GAMMA"]
+
+SRGB_GAMMA = 2.2
+# 12-bit sensor. Quantising here rather than at 8 bits keeps the shot noise from
+# being swamped by rounding before the forward pipeline runs.
+SENSOR_MAX = 4095.0
 
 
-def synthesize_low_light(
-    image: np.ndarray,
-    rng: np.random.Generator,
-    **params,
-) -> np.ndarray:
-    """Darken one RGB image with an inverse-ISP + sensor-noise model.
+@dataclass(frozen=True)
+class NightParams:
+    """One image's illumination parameters. Reproducible from the image id."""
+
+    exposure: float          # linear scale factor on radiance (<1 darkens)
+    read_noise: float        # Gaussian sigma, in sensor DN
+    iso_gain: float          # analogue gain applied after the sensor
+    wb_gain_r: float         # linear per-channel gains: low light is blue-shifted
+    wb_gain_b: float
+    gamma: float = SRGB_GAMMA
+
+
+def sample_night_params(image_id: str, seed: int = 0) -> NightParams:
+    """Deterministic per-image parameters.
+
+    Keyed on the image id rather than on a running counter so that a rebuild, a
+    reordering, or building only part of the corpus all produce the same
+    degradation for the same image.
+    """
+    digest = hashlib.sha256(f"{seed}:{image_id}".encode()).digest()
+    rng = np.random.default_rng(int.from_bytes(digest[:8], "big"))
+
+    # Exposure spans roughly civil twilight to night. Log-uniform because
+    # perceived brightness is logarithmic, so uniform sampling would crowd the
+    # bright end and leave the hard cases under-represented.
+    exposure = float(np.exp(rng.uniform(np.log(0.02), np.log(0.25))))
+    return NightParams(
+        exposure=exposure,
+        read_noise=float(rng.uniform(1.0, 6.0)),
+        iso_gain=float(rng.uniform(1.0, 4.0)),
+        wb_gain_r=float(rng.uniform(0.85, 1.05)),
+        wb_gain_b=float(rng.uniform(1.0, 1.35)),
+    )
+
+
+def apply_night(img: np.ndarray, params: NightParams) -> np.ndarray:
+    """Apply the low-light pipeline to an 8-bit RGB image.
 
     Args:
-        image: HxWx3 uint8 RGB.
-        rng: seeded generator; parameters are drawn per call, per the
-            domain-randomisation requirement above.
-        **params: bounds of the parameter distribution — undecided, see
-            `03-datasets.md` open question 2.
+        img: uint8 array, HxWx3, RGB order.
+        params: from `sample_night_params`.
 
     Returns:
-        HxWx3 uint8 RGB, darkened.
-
-    Raises:
-        NotImplementedError: always. Synthesis is out of scope for the scaffold.
+        uint8 array of the same shape.
     """
-    raise NotImplementedError(
-        "Low-light synthesis is deliberately unimplemented. It is blocked on "
-        "03-datasets.md open question 2 (which parameterisation, and are "
-        "parameters held fixed across train and test?). See this module's "
-        "docstring for what goes here."
+    if img.dtype != np.uint8:
+        raise TypeError(f"expected uint8 image, got {img.dtype}")
+
+    # --- inverse ISP: sRGB -> linear radiance -------------------------
+    linear = (img.astype(np.float32) / 255.0) ** params.gamma
+
+    # --- fewer photons, and a white-balance shift ---------------------
+    linear = linear * params.exposure
+    linear[..., 0] *= params.wb_gain_r
+    linear[..., 2] *= params.wb_gain_b
+
+    # --- sensor: shot noise, then read noise --------------------------
+    # ISO gain models a SHORTER shutter amplified afterwards, not extra light.
+    # So the photon count is divided by the gain before Poisson sampling and
+    # multiplied back after: output brightness is set by `exposure` alone, while
+    # `iso_gain` controls how noisy that brightness is. Applying the gain only
+    # on the way out (the obvious mistake) brightens the image back up and can
+    # cancel the darkening entirely — measured: 11% darker at the p95 of the
+    # parameter range, which is not night by any definition.
+    electrons = np.clip(linear, 0, None) * SENSOR_MAX / params.iso_gain
+    rng = np.random.default_rng(
+        int.from_bytes(hashlib.sha256(str(asdict(params)).encode()).digest()[:8], "big")
     )
+    noisy = rng.poisson(electrons).astype(np.float32)
+    noisy += rng.normal(0.0, params.read_noise, size=noisy.shape).astype(np.float32)
+
+    # --- analogue gain, quantise, back to sRGB ------------------------
+    noisy = np.clip(noisy * params.iso_gain, 0, SENSOR_MAX)
+    linear_out = np.round(noisy) / SENSOR_MAX
+    srgb = np.clip(linear_out, 0, 1) ** (1.0 / params.gamma)
+    return (srgb * 255.0 + 0.5).astype(np.uint8)
+
+
+def night_statistics(clear: np.ndarray, night: np.ndarray) -> dict[str, float]:
+    """Diagnostics for verifying a generated corpus.
+
+    Reported per image so a build can assert the degradation actually happened
+    and lands in a sane range, rather than trusting that it did.
+    """
+    c = clear.astype(np.float32)
+    n = night.astype(np.float32)
+    grey_c = c.mean(axis=2)
+    grey_n = n.mean(axis=2)
+    return {
+        "brightness_clear": float(grey_c.mean()),
+        "brightness_night": float(grey_n.mean()),
+        "brightness_ratio": float(grey_n.mean() / max(grey_c.mean(), 1e-6)),
+        "contrast_clear": float(grey_c.std()),
+        "contrast_night": float(grey_n.std()),
+        # High-frequency energy rises with sensor noise even as contrast falls;
+        # the pair separates "dark" from "dark and noisy".
+        "highfreq_clear": float(np.abs(np.diff(grey_c, axis=1)).mean()),
+        "highfreq_night": float(np.abs(np.diff(grey_n, axis=1)).mean()),
+    }

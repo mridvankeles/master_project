@@ -39,6 +39,9 @@ class RunConfig:
     # Its presence is what selects the MoE trainer, so a stock run and an MoE
     # run differ by configuration rather than by code path.
     moe: dict[str, Any] | None = None
+    # Box-loss selection, e.g. {"nwd": "gated", "nwd_c": 12.8}. Separate from
+    # `moe` so the routing effect and the loss effect stay separable.
+    loss: dict[str, Any] | None = None
 
     @property
     def model_path(self) -> Path:
@@ -110,4 +113,5 @@ def load_run_config(path: str | Path) -> RunConfig:
         train=dict(raw.get("train") or {}),
         subset=raw.get("subset"),
         moe=raw.get("moe"),
+        loss=raw.get("loss"),
     )

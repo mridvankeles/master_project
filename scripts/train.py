@@ -191,16 +191,25 @@ def main() -> int:
         # live in a DetectionTrainer subclass. Selected by the config's `moe:`
         # block so a stock run and an MoE run differ by configuration only.
         trainer_cls = None
-        if cfg.moe:
+        if cfg.moe or cfg.loss:
             from src.models.moe_trainer import MoEDetectionTrainer
 
             trainer_cls = MoEDetectionTrainer
-            train_args.update(
-                moe_lambda=cfg.moe.get("lambda", 0.01),
-                moe_aux=cfg.moe.get("aux", "entropy"),
-            )
-            mlflow.log_params({f"moe_{k}": v for k, v in cfg.moe.items()})
-            log.info("MoE run: %s", cfg.moe)
+            if cfg.moe:
+                train_args.update(
+                    moe_lambda=cfg.moe.get("lambda", 0.01),
+                    moe_aux=cfg.moe.get("aux", "entropy"),
+                )
+                mlflow.log_params({f"moe_{k}": v for k, v in cfg.moe.items()})
+                log.info("MoE run: %s", cfg.moe)
+            if cfg.loss:
+                train_args.update(
+                    nwd=cfg.loss.get("nwd", "off"),
+                    nwd_c=cfg.loss.get("nwd_c", 12.8),
+                    nwd_tiny_area=cfg.loss.get("tiny_area", 32.0**2),
+                )
+                mlflow.log_params({f"loss_{k}": v for k, v in cfg.loss.items()})
+                log.info("loss config: %s", cfg.loss)
 
         model = YOLO(str(cfg.scaled_model()), task=cfg.task)
 
