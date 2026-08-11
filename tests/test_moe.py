@@ -122,6 +122,41 @@ def test_aux_loss_is_zero_without_moe_blocks():
     assert routing_stats(plain) == {}
 
 
+def test_noisy_routing_prevents_cold_start_collapse():
+    """Noise must keep both experts alive at initialisation.
+
+    The experts are zero-initialised so the block is an identity at step 0,
+    which means they also produce IDENTICAL outputs and the argmax is decided by
+    gate noise alone. Whichever expert wins takes all the gradient, the loser
+    gets none, and the lead compounds — measured as expert0 falling to a 0.000
+    share by epoch 2 before noise was added.
+    """
+    torch.manual_seed(0)
+    worst_without, worst_with = [], []
+    for _ in range(5):
+        x = torch.randn(64, 64, 20, 20)
+        for std, sink in ((0.0, worst_without), (1.0, worst_with)):
+            block = MoEBlock(c1=64, c2=64, n_experts=2, noise_std=std).train()
+            with torch.no_grad():
+                block(x)
+            sink.append(min(routing_stats(block).values()))
+
+    assert min(worst_without) < 0.1, "expected the un-noised gate to be able to collapse"
+    assert min(worst_with) > 0.25, "noisy routing must keep both experts fed"
+
+
+def test_routing_is_deterministic_at_eval():
+    """Noise is training-only: predictions must be reproducible."""
+    block = MoEBlock(c1=64, c2=64, n_experts=2, noise_std=1.0).eval()
+    x = torch.randn(32, 64, 20, 20)
+    with torch.no_grad():
+        block(x)
+        first = block.last_index.clone()
+        block(x)
+        second = block.last_index.clone()
+    assert torch.equal(first, second)
+
+
 def test_experts_have_heterogeneous_kernels():
     """Kernel heterogeneity was the single largest effect in MFG-HMoE's ablation."""
     block = _block()

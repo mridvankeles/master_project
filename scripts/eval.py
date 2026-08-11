@@ -145,6 +145,35 @@ def _absorb(detections, images, results, task: str) -> None:
                 detections.append(Detection(path.stem, int(c), float(s), tuple(float(v) for v in b)))
 
 
+def _model_yaml_for(checkpoint: Path, cfg) -> Path | None:
+    """The architecture yaml that produced `checkpoint`.
+
+    Ultralytics writes `args.yaml` beside the weights, recording the `model`
+    the run was built from. That is authoritative; `--config` is only
+    authoritative about the DATA when the two deliberately differ.
+    """
+    args_yaml = checkpoint.parent.parent / "args.yaml"
+    if args_yaml.exists():
+        try:
+            import yaml as _yaml
+
+            model = (_yaml.safe_load(args_yaml.read_text(encoding="utf-8")) or {}).get("model")
+            if model:
+                path = Path(model)
+                if path.exists():
+                    return path
+                # Ultralytics records the SCALED name (`yolo11n_dior_hbb.yaml`),
+                # which is not a file on disk — it strips the scale letter when
+                # resolving. Undo that to recover the real yaml.
+                family, _, rest = path.stem.partition("_")
+                descaled = path.with_name(f"{family[:-1]}_{rest}{path.suffix}")
+                if descaled.exists():
+                    return descaled
+        except Exception:  # noqa: BLE001 - fall back rather than fail the eval
+            pass
+    return cfg.model_path if cfg else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", default=None, help="path to a .pt")
@@ -355,7 +384,12 @@ def main() -> int:
                 "voc07_conf": args.voc07_conf,
                 f"n_images_{args.split}": n_images,
                 **dataset_fingerprint(data_yaml),
-                **model_fingerprint(cfg.model_path if cfg else None),
+                # Architecture identity must come from the CHECKPOINT, not from
+                # `--config`. Cross-condition evaluations deliberately pair a
+                # checkpoint with another arm's data config (an MoE model scored
+                # on clear, say), and taking the yaml from the config would
+                # label an MoE run with the stock architecture.
+                **model_fingerprint(_model_yaml_for(checkpoint, cfg)),
             },
             metrics=metrics,
             artifacts=[out_dir],

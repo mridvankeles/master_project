@@ -71,3 +71,49 @@ distributed sensibly rather than a handful of classes carrying everything).
 It fails if the number is far enough below that a data or conversion bug is the
 better explanation than capacity — which is exactly what the gate exists to catch
 before months of downstream work rest on it.
+
+---
+
+# VERDICT — GATE 1 PASSED (2026-08-10)
+
+Run `clear_full_yolo11n`, seed 0, 100 epochs, 67.6 min on an RTX 5070 Ti.
+Evaluated once on the full 11,738-image DIOR test split.
+
+| | value |
+|---|---|
+| **VOC07 mAP@0.5** (the comparable number) | **65.2** |
+| COCO mAP50 | 69.8 |
+| COCO mAP50-95 | 49.5 |
+| Precision / Recall | 0.836 / 0.639 |
+
+Against the table above: **+8.1 over the YOLOv3 reference (57.1)** and **0.9
+below the published ceiling (66.1)**, which RetinaNet and PANet reach with
+ResNet-101.
+
+That result is stronger than the gate required, and it is worth being precise
+about why rather than claiming a win over the field:
+
+- We use **half the training data** the published numbers used — 5,862 against
+  their 11,725 — because `val` is held back for checkpoint selection.
+- YOLO11n is **2.6 M parameters**. Darknet-53 is ~62 M and ResNet-101 is larger
+  still, so this is a nano model landing within a point of backbones ~20–40x
+  its size.
+- The gap is explained by six years of detector progress (2019 vs 2025
+  architectures, and COCO pretraining), not by a better experimental setup.
+
+**Per-class distribution — the part the gate actually tests.** A high mAP carried
+by two or three easy classes would indicate a broken pipeline, not a working one:
+
+- 19 of 20 classes above AP50 0.5; **none below 0.2**
+- min 0.404 (`bridge`), median 0.748, max 0.892 (`ship`)
+- the weakest classes are the ones the literature expects — `bridge` 0.404 and
+  `vehicle` 0.516, both small/elongated — not an arbitrary subset
+
+Compare the earlier 651-image from-scratch run, which produced 7 classes under
+AP50 0.2 and `storagetank` at P 0.905 / R 0.093. `storagetank` is now at AP50
+0.748. That failure was data starvation and missing pretraining, not a
+conversion bug.
+
+**Conclusion: the pipeline is sound and downstream numbers are measurable
+against it.** Gate 1 is cleared; the corpus, the label conversion, the splits and
+the metric implementations are all confirmed working end to end.

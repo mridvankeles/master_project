@@ -82,6 +82,7 @@ class MoEBlock(nn.Module):
         kernels: tuple[int, ...] = (3, 5),
         bottleneck: float = 0.5,
         shared: bool = False,
+        noise_std: float = 1.0,
     ):
         super().__init__()
         c2 = c1 if c2 is None else c2
@@ -106,6 +107,20 @@ class MoEBlock(nn.Module):
         self.proj = nn.Identity() if c1 == c2 else nn.Conv2d(c1, c2, 1, bias=False)
 
         self.gate = nn.Linear(c1, self.n_experts)
+        # Noisy top-k (06-moe-design-guide.md 2.4): Gaussian noise on the gate
+        # logits during TRAINING ONLY, so selection explores instead of locking
+        # in. Without it this block collapses by epoch 2, and the mechanism is
+        # not subtle: the experts are zero-initialised (see below), so at step 0
+        # they produce identical outputs and the argmax is decided by gate noise
+        # alone. Whichever expert wins receives all the gradient, the loser
+        # receives none and never improves, and the lead compounds. Measured:
+        # expert0 share 0.004 at epoch 1, 0.000 at epoch 2.
+        #
+        # Noise breaks the feedback loop by giving the losing expert a stream of
+        # samples early on. It decays in effect naturally as the gate's logit
+        # gap grows beyond the noise scale, so a confident router is still
+        # allowed to become confident.
+        self.noise_std = float(noise_std)
         # Zero-init the last conv of each expert so the block starts as an exact
         # identity. A pretrained backbone therefore survives insertion intact and
         # the experts differentiate from a working model rather than from noise.
@@ -122,8 +137,14 @@ class MoEBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         logits = self.gate(x.mean((2, 3)))  # image-level: one decision per sample
         self.last_logits = logits
+        # The auxiliary loss and the reported utilisation both read the CLEAN
+        # logits; only the selection is noisy. Otherwise the logged shares would
+        # describe the noise rather than the router.
         weights = logits.softmax(1)
-        index = logits.argmax(1)
+        routing_logits = logits
+        if self.training and self.noise_std > 0:
+            routing_logits = logits + torch.randn_like(logits) * self.noise_std
+        index = routing_logits.argmax(1)
         self.last_index = index
 
         out = self.proj(x)
