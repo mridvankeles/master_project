@@ -42,6 +42,9 @@ class RunConfig:
     # Box-loss selection, e.g. {"nwd": "gated", "nwd_c": 12.8}. Separate from
     # `moe` so the routing effect and the loss effect stay separable.
     loss: dict[str, Any] | None = None
+    # Supervised gating, e.g. {"lambda": 1.0}. Uses the condition labels already
+    # present in union-corpus filenames.
+    gate: dict[str, Any] | None = None
 
     @property
     def model_path(self) -> Path:
@@ -114,4 +117,5 @@ def load_run_config(path: str | Path) -> RunConfig:
         subset=raw.get("subset"),
         moe=raw.get("moe"),
         loss=raw.get("loss"),
+        gate=raw.get("gate"),
     )

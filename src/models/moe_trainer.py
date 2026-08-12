@@ -51,6 +51,10 @@ class MoEDetectionTrainer(DetectionTrainer):
         # Box-loss selection. Independent of the MoE: a run may use NWD with a
         # stock model, or an MoE with the stock box loss, and the two effects
         # have to be separable in the results table.
+        # Weight on the supervised gate loss. This is what makes branch i MEAN
+        # condition i; the entropy auxiliary only ever asked for balance, which
+        # a gate splitting on anything at all satisfies equally well.
+        self.gate_lambda = float(overrides.pop("gate_lambda", 0.0))
         self.nwd_mode = str(overrides.pop("nwd", "off"))
         self.nwd_c = float(overrides.pop("nwd_c", 12.8))
         self.nwd_tiny_area = float(overrides.pop("nwd_tiny_area", 32.0**2))
@@ -58,18 +62,24 @@ class MoEDetectionTrainer(DetectionTrainer):
         self._epoch_shares: dict[str, float] = defaultdict(float)
         self._epoch_batches = 0
         self._last_aux = 0.0
+        self._last_gate_loss = 0.0
+        self._cond_report: dict[str, float] = {}
         super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
         self.add_callback("on_fit_epoch_end", _log_utilisation)
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         model = super().get_model(cfg=cfg, weights=weights, verbose=verbose)
+        from .moe2 import cond_moe_blocks
+
         blocks = moe_blocks(model)
+        cond_blocks = cond_moe_blocks(model)
         LOGGER.info(
-            f"MoE trainer: {len(blocks)} block(s), lambda={self.moe_lambda}, "
-            f"aux={self.moe_aux}, nwd={self.nwd_mode}"
+            f"MoE trainer: {len(blocks)} legacy block(s), {len(cond_blocks)} cond block(s), "
+            f"lambda={self.moe_lambda}, aux={self.moe_aux}, "
+            f"gate_lambda={self.gate_lambda}, nwd={self.nwd_mode}"
         )
         use_aux = self.moe_lambda != 0 and bool(blocks)
-        if not use_aux and self.nwd_mode == "off":
+        if not use_aux and self.nwd_mode == "off" and not (self.gate_lambda and cond_blocks):
             LOGGER.warning("MoE trainer: neither auxiliary loss nor NWD is active")
             return model
 
@@ -89,17 +99,62 @@ class MoEDetectionTrainer(DetectionTrainer):
                 LOGGER.info(f"NWD box loss installed: {ok} (mode={self.nwd_mode})")
                 if not ok:
                     LOGGER.error("NWD requested but the criterion had no bbox_loss")
+                total_first = self._add_gate_supervision(model, total_first, batch)
                 return self._finish(model, total_first, items_first, use_aux)
 
             total, items = inner_loss(batch, preds)
+            total = self._add_gate_supervision(model, total, batch)
             return self._finish(model, total, items, use_aux)
 
         model.loss = loss_with_aux
         return model
 
+    def _add_gate_supervision(self, model, total, batch):
+        """Cross-entropy between the gate and the condition labels in filenames.
+
+        Training only. The validator calls `model.loss(batch, preds)` with preds
+        already computed, so no forward re-runs and `last_logits` still holds a
+        previous batch's gate output — supervising against the current batch's
+        labels would then compare unrelated rows (and crash on a size mismatch,
+        which is how this was found).
+        """
+        if self.gate_lambda == 0 or not model.training:
+            return total
+        from .moe2 import cond_moe_blocks, condition_from_paths, gate_supervision_loss
+
+        blocks = cond_moe_blocks(model)
+        if not blocks:
+            return total
+        paths = batch.get("im_file") if isinstance(batch, dict) else None
+        if not paths:
+            return total
+        targets = condition_from_paths(paths)
+        # Belt and braces: if the stashed logits do not line up with this batch,
+        # they are stale and must not be used.
+        stale = [b for b in blocks if b.last_logits is not None
+                 and b.last_logits.shape[0] != targets.shape[0]]
+        if stale:
+            return total
+        loss = gate_supervision_loss(model, targets)
+        if isinstance(loss, torch.Tensor):
+            self._last_gate_loss = float(loss.detach())
+            term = self.gate_lambda * loss
+            if isinstance(total, torch.Tensor) and total.ndim > 0:
+                total = total.clone()
+                total[0] = total[0] + term
+            else:
+                total = total + term
+        return total
+
     def _finish(self, model, total, items, use_aux: bool):
-        """Add the routing auxiliary term and record utilisation."""
+        """Add the routing auxiliary term and record utilisation.
+
+        `_accumulate` runs unconditionally: a condition-gated run has no legacy
+        auxiliary loss, but its routing statistics are the whole point of the
+        experiment and must still be recorded.
+        """
         if not use_aux:
+            self._accumulate(model)
             return total, items
         aux = routing_aux_loss(model, mode=self.moe_aux)
         if isinstance(aux, torch.Tensor):
@@ -138,6 +193,13 @@ class MoEDetectionTrainer(DetectionTrainer):
                 obj.__dict__["loss"] = fn
 
     def _accumulate(self, model) -> None:
+        from .moe2 import routing_report
+
+        # CLEAN activation rates -- never the noisy mask. Logging the noisy one
+        # is exactly what hid the previous router collapse. Training-mode only,
+        # for the same staleness reason as the gate supervision.
+        if model.training:
+            self._cond_report = routing_report(model)
         for b_i, block in enumerate(moe_blocks(model)):
             idx = block.last_index
             if idx is None:
@@ -154,6 +216,8 @@ class MoEDetectionTrainer(DetectionTrainer):
             return {}
         out = {k: v / self._epoch_batches for k, v in self._epoch_shares.items()}
         out["moe/aux_loss"] = self._last_aux
+        out["moe/gate_loss"] = getattr(self, "_last_gate_loss", 0.0)
+        out.update(self._cond_report)
         # min share across experts: one number that says "is anything dying?"
         shares = [v for k, v in out.items() if k.endswith("_share")]
         if shares:

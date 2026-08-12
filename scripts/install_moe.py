@@ -49,6 +49,7 @@ IMPORT_LINE = (
     "if str(_repo) not in _sys.path:\n"
     "    _sys.path.insert(0, str(_repo))\n"
     "from src.models.moe import MoEBlock  # noqa: E402,F401\n"
+    "from src.models.moe2 import CondMoEBlock  # noqa: E402,F401\n"
 )
 
 MARKER = "thesis MoE block (registered by scripts/install_moe.py)"
@@ -80,10 +81,10 @@ def _patch_tasks(path: Path, repo: str) -> bool:
     # so the entry must go before the closing BRACE, not before the closing
     # paren -- inserting between `}` and `)` is a syntax error.
     anchor = "    base_modules = frozenset(\n        {\n"
-    if anchor in text and "MoEBlock," not in text.split(anchor, 1)[1][:3000]:
+    if anchor in text and "CondMoEBlock," not in text.split(anchor, 1)[1][:3000]:
         head, tail = text.split(anchor, 1)
         close = tail.index("        }\n")
-        tail = tail[:close] + "            MoEBlock,\n" + tail[close:]
+        tail = tail[:close] + "            MoEBlock,\n            CondMoEBlock,\n" + tail[close:]
         text = head + anchor + tail
         changed = True
 
@@ -110,7 +111,7 @@ def main() -> int:
 
         try:
             nn_tasks = importlib.import_module("ultralytics.nn.tasks")
-            ok = hasattr(nn_tasks, "MoEBlock")
+            ok = hasattr(nn_tasks, "MoEBlock") and hasattr(nn_tasks, "CondMoEBlock")
         except Exception as exc:  # noqa: BLE001
             log.error("import failed: %s", exc)
             return 1
@@ -129,7 +130,7 @@ def main() -> int:
     for name in ("ultralytics.nn.modules", "ultralytics.nn.tasks", "ultralytics"):
         sys.modules.pop(name, None)
     nn_tasks = importlib.import_module("ultralytics.nn.tasks")
-    if not hasattr(nn_tasks, "MoEBlock"):
+    if not (hasattr(nn_tasks, "MoEBlock") and hasattr(nn_tasks, "CondMoEBlock")):
         log.error("MoEBlock still not visible to parse_model")
         return 1
     log.info("verified: parse_model can resolve 'MoEBlock'")
