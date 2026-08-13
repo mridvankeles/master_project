@@ -46,7 +46,23 @@ from src.utils.paths import OUTPUT_DIR, dataset_root, ensure_dir  # noqa: E402
 
 log = get_logger("analyse_routing")
 
+from src.models.moe2 import CONDITION_ALIASES  # noqa: E402
+
 CONDITIONS = ("clear", "fog", "night")
+
+
+def _condition_of(stem: str, default: str) -> str:
+    """First recognised condition token in the filename, aliases resolved.
+
+    `fog2` is the calibrated fog synthesis and must map to the `fog` branch;
+    without this its images fall into the default bucket and the fog row simply
+    vanishes from the confusion matrix.
+    """
+    for tok in stem.lower().split("_"):
+        tok = CONDITION_ALIASES.get(tok, tok)
+        if tok in CONDITIONS:
+            return tok
+    return default
 
 
 def linear_cka(x: torch.Tensor, y: torch.Tensor) -> float:
@@ -121,10 +137,7 @@ def main() -> int:
             if getattr(block, "last_active", None) is not None:
                 active_rows.extend(block.last_active.cpu().tolist())
             # `clear_00042` -> clear ; a bare id means the dir is single-condition
-            truth.extend(
-                [p.stem.split("_")[0] if p.stem.split("_")[0] in CONDITIONS else args.condition
-                 for p in chunk]
-            )
+            truth.extend([_condition_of(p.stem, args.condition) for p in chunk])
     handle.remove()
 
     # --- 1. routing vs condition ------------------------------------------

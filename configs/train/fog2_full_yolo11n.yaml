@@ -1,0 +1,46 @@
+# CALIBRATED fog specialist (fog2, dark-channel +110 matching real haze).
+# The counterpart to fog_full_yolo11n, which used the weaker Hazy-DIOR release.
+# Needed for the interference test: without a specialist there is nothing to
+# compare the union model against.
+#
+# ONE OF THREE ARMS THAT MUST STAY COMPARABLE. Every hyperparameter below is
+# identical across clear/fog/union; only `condition` differs. The subset sizes
+# equalise the gradient budget: each arm sees 5,862 training images per epoch
+# and validates on 2,000, so all three take the same number of optimizer steps
+# under the same cosine schedule. Fog has 17,505 training images available and
+# is deliberately NOT given them -- a bigger fog arm would score higher and be
+# uncomparable to clear.
+#
+# TEST IS NEVER SUBSET. Evaluation runs on the full test split.
+#
+# `pretrained: yolo11n.pt` is a real transfer here, verified: 448/499 tensors
+# load and the backbone is bit-identical to the COCO checkpoint. Earlier runs
+# said `pretrained: true`, which is a silent no-op with a .yaml model.
+
+run_name: fog2_full_yolo11n
+experiment: dior-hbb-full
+condition: fog2
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000

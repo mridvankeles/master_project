@@ -99,6 +99,13 @@ def main() -> int:
             continue
         ckpt = OUTPUT_DIR / "runs" / ckpt_run / "weights" / "best.pt"
         cfg = REPO_ROOT / CFG / f"{data_run}.yaml"
+        if not cfg.exists():
+            # Never fall back to another arm's data config. A missing config
+            # silently evaluated against the wrong corpus once already, and the
+            # result was two "different" cells reporting byte-identical numbers.
+            log.error("skip %-24s (no data config: %s)", name, cfg.name)
+            failed.append(name)
+            continue
         if not ckpt.exists():
             log.warning("skip %-24s (no checkpoint: %s)", name, ckpt_run)
             skipped.append(name)
