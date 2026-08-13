@@ -117,6 +117,28 @@ class EvalReport:
         return dst
 
 
+def class_names_from(data_yaml: Path) -> list[str]:
+    """Class names from the data yaml, falling back to DIOR's.
+
+    Naming per-class rows with DIOR_CLASSES regardless of corpus reports the two
+    DroneVehicle classes as "airplane" and "airport". The aggregate metrics stay
+    correct, so the error is invisible in the headline number and wrong in
+    exactly the table the analysis argues from.
+    """
+    import yaml as _yaml
+
+    try:
+        spec = _yaml.safe_load(Path(data_yaml).read_text(encoding="utf-8")) or {}
+        names = spec.get("names")
+        if isinstance(names, dict):
+            return [names[k] for k in sorted(names)]
+        if isinstance(names, list) and names:
+            return list(names)
+    except Exception:  # noqa: BLE001
+        pass
+    return list(DIOR_CLASSES)
+
+
 def from_ultralytics(
     results,
     checkpoint: Path,
@@ -128,6 +150,7 @@ def from_ultralytics(
 ) -> EvalReport:
     """Build an EvalReport from an Ultralytics DetMetrics object."""
     box = results.box
+    names = class_names_from(data_yaml)
 
     report = EvalReport(
         checkpoint=str(checkpoint),
@@ -154,7 +177,7 @@ def from_ultralytics(
     for pos, class_id in enumerate(present):
         report.per_class.append(
             ClassMetrics(
-                name=DIOR_CLASSES[int(class_id)],
+                name=names[int(class_id)] if int(class_id) < len(names) else f"class_{int(class_id)}",
                 class_id=int(class_id),
                 instances=int(counts.get(int(class_id), 0)),
                 precision=float(box.p[pos]),
@@ -166,7 +189,7 @@ def from_ultralytics(
 
     # Classes with no instances never appear in ap_class_index; record them
     # explicitly so a reader can tell "absent" from "scored zero".
-    for class_id, name in enumerate(DIOR_CLASSES):
+    for class_id, name in enumerate(names):
         if class_id not in [int(c) for c in present]:
             report.per_class.append(
                 ClassMetrics(
