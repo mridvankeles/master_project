@@ -40,6 +40,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from src.models.moe import moe_blocks  # noqa: E402
+from src.models.moe2 import cond_moe_blocks  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.paths import OUTPUT_DIR, dataset_root, ensure_dir  # noqa: E402
 
@@ -76,13 +77,14 @@ def main() -> int:
         return 2
     model = YOLO(str(ckpt))
     net = model.model.to(args.device).eval().float()
-    blocks = moe_blocks(net)
+    blocks = moe_blocks(net) + cond_moe_blocks(net)
     if not blocks:
         log.error("%s has no MoE block", args.run)
         return 2
     block = blocks[0]
     n_experts = block.n_experts
-    log.info("%s: %d expert(s), kernels=%s", args.run, n_experts, block.kernels)
+    kinds = getattr(block, "expert_kinds", getattr(block, "kernels", None))
+    log.info("%s: %d expert(s), %s", args.run, n_experts, kinds)
 
     img_dir = dataset_root("detect", "full") / args.condition / "images" / args.split
     images = sorted(p for p in img_dir.iterdir() if p.suffix.lower() in {".jpg", ".png"})
@@ -100,6 +102,7 @@ def main() -> int:
     handle = block.register_forward_hook(hook)
 
     routes: list[int] = []
+    active_rows: list[list[float]] = []
     truth: list[str] = []
     import cv2
 
@@ -115,6 +118,8 @@ def main() -> int:
             captured.clear()
             net(x)
             routes.extend(block.last_index.cpu().tolist())
+            if getattr(block, "last_active", None) is not None:
+                active_rows.extend(block.last_active.cpu().tolist())
             # `clear_00042` -> clear ; a bare id means the dir is single-condition
             truth.extend(
                 [p.stem.split("_")[0] if p.stem.split("_")[0] in CONDITIONS else args.condition
@@ -151,7 +156,21 @@ def main() -> int:
     # information at all, so NMI is 0 by definition rather than undefined.
     nmi = 0.0 if h_r < 1e-12 or h_c < 1e-12 else mi / (h_c * h_r) ** 0.5
     log.info("route distribution: %s", {f"e{i}": round(float(p), 3) for i, p in enumerate(p_route)})
-    log.info("normalised mutual information(route ; condition) = %.4f", nmi)
+    log.info("normalised mutual information(argmax ; condition) = %.4f", nmi)
+    if active_rows:
+        import numpy as _np
+        A = _np.array(active_rows)
+        log.info("mean experts ACTIVE per image (clean, threshold): %.3f", A.sum(1).mean())
+        names = getattr(block, "expert_kinds", [str(i) for i in range(n_experts)])
+        for i, nm in enumerate(names):
+            log.info("  %-8s activation rate %.3f", nm, A[:, i].mean())
+        # Per-condition activation of the branch that NAMES that condition:
+        # this is the direct test of 'does the fog branch fire on fog?'
+        for ci, c in enumerate(conds):
+            rows = A[[k for k, t in enumerate(truth) if t == c]]
+            if len(rows) and c in list(names):
+                log.info("  true=%-6s -> %s branch fires %.3f of the time",
+                         c, c, rows[:, list(names).index(c)].mean())
     log.info("  (1.0 = route is the condition; 0.0 = gate splits on something else)")
 
     # --- 2. do the experts compute different functions? --------------------
