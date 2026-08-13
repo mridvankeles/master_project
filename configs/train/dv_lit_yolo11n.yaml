@@ -1,0 +1,36 @@
+# DroneVehicle LIT control, matched budget.
+#
+# REAL low-light trial on DroneVehicle. 2 classes (small/large vehicle), drone
+# platform -- so this is a SEPARATE experiment, not a DIOR arm. It cannot join
+# the DIOR corpus: different taxonomy, and different platform is exactly the
+# confound 03-datasets.md Risk 2 warns a router would exploit.
+#
+# Matched budget across the two arms so `dark` and `lit` are comparable.
+
+run_name: dv_lit_yolo11n
+experiment: dronevehicle
+condition: lit
+scope: full
+data: configs/data/dronevehicle_lit.yaml
+seed: 0
+
+model: configs/model/yolo11_dv_hbb.yaml
+scale: n
+
+train:
+  epochs: 60
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 6
+  optimizer: auto
+  patience: 20
+  cos_lr: true
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  deterministic: true
+
+subset:
+  train: 4000
+  val: 900

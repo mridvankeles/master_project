@@ -45,6 +45,9 @@ class RunConfig:
     # Supervised gating, e.g. {"lambda": 1.0}. Uses the condition labels already
     # present in union-corpus filenames.
     gate: dict[str, Any] | None = None
+    # Explicit data yaml, for corpora that do not follow the DIOR naming
+    # convention (DroneVehicle, for instance). Overrides the derived path.
+    data: str | None = None
 
     @property
     def model_path(self) -> Path:
@@ -58,12 +61,26 @@ class RunConfig:
         HBB and OBB have separate yamls pointing at separate dataset roots, so
         an oriented label can never reach a detect model or the reverse.
         """
+        if self.data:
+            p = Path(self.data)
+            return p if p.is_absolute() else REPO_ROOT / p
         suffix = "" if self.task == "detect" else "_obb"
         scope = "" if self.scope == "aligned" else f"_{self.scope}"
         return CONFIG_DIR / "data" / f"dior_{self.condition}{suffix}{scope}.yaml"
 
     @property
     def dataset_root(self) -> Path:
+        """Where the materialised corpus lives.
+
+        Derived from the data yaml's own `path:` when one is given explicitly,
+        so a non-DIOR corpus does not have to pretend to be a DIOR one.
+        """
+        if self.data:
+            import yaml as _yaml
+
+            spec = _yaml.safe_load(self.data_yaml.read_text(encoding="utf-8")) or {}
+            return Path(spec["path"]).parent
+
         from .paths import dataset_root
 
         return dataset_root(self.task, self.scope)
@@ -118,4 +135,5 @@ def load_run_config(path: str | Path) -> RunConfig:
         moe=raw.get("moe"),
         loss=raw.get("loss"),
         gate=raw.get("gate"),
+        data=raw.get("data"),
     )

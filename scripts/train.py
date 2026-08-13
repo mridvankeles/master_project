@@ -47,6 +47,27 @@ MLRUNS_DIR = OUTPUT_DIR / "mlruns"
 RUNS_DIR = OUTPUT_DIR / "runs"
 
 
+def class_names_for(cfg: RunConfig) -> list[str]:
+    """Class names from the corpus's own data yaml, falling back to DIOR's.
+
+    Hardcoding DIOR_CLASSES here would silently write 20 DIOR names into the
+    subset yaml of a 2-class corpus like DroneVehicle -- the model would train
+    with the wrong `nc` and every per-class number would be mislabelled.
+    """
+    import yaml as _yaml
+
+    try:
+        spec = _yaml.safe_load(cfg.data_yaml.read_text(encoding="utf-8")) or {}
+        names = spec.get("names")
+        if isinstance(names, dict):
+            return [names[k] for k in sorted(names)]
+        if isinstance(names, list) and names:
+            return list(names)
+    except Exception:  # noqa: BLE001
+        pass
+    return list(DIOR_CLASSES)
+
+
 def build_subset_data_yaml(cfg: RunConfig) -> Path:
     """Write class-stratified train/val image lists plus a data yaml for them."""
     # `cfg.dataset_root`, not `dataset_root(cfg.task)`: the latter ignores scope
@@ -59,10 +80,11 @@ def build_subset_data_yaml(cfg: RunConfig) -> Path:
     for split, n in (cfg.subset or {}).items():
         picks, counts = stratified_subset(root / "images" / split, n=int(n), seed=cfg.seed)
         lists[split] = write_image_list(picks, out_dir / f"{cfg.run_name}_{split}.txt")
-        missing = [c for c in DIOR_CLASSES if c not in counts]
+        names = class_names_for(cfg)
+        missing = [c for c in names if c not in counts]
         log.info(
             "subset %-5s: %d images, %d/%d classes present",
-            split, len(picks), len(counts), len(DIOR_CLASSES),
+            split, len(picks), len(counts), len(names),
         )
         if missing:
             log.warning(
@@ -81,7 +103,7 @@ def build_subset_data_yaml(cfg: RunConfig) -> Path:
         "test: images/test",
         "",
         "names:",
-        *[f"  {i}: {n}" for i, n in enumerate(DIOR_CLASSES)],
+        *[f"  {i}: {n}" for i, n in enumerate(class_names_for(cfg))],
     ]
     dst.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return dst
