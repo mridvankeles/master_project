@@ -246,3 +246,33 @@ Deweather-MoE with uncertainty-aware FiLM.
 
 Measured here: RRSHID router response, RRSHID vs Hazy-DIOR haze statistics,
 DIOR per-class object scale, HazyDet EDA.
+
+---
+
+## 6. CONFIRMED (2026-08-13, no retraining required)
+
+The weak-fog hypothesis in §0.2 and §3.1 predicted that the *existing* gate —
+trained only on the weak Hazy-DIOR fog — would route a stronger fog corpus
+better, because the gate had learned haze and the corpus simply lacked it.
+
+Tested by running `cond3_gated`'s unchanged gate over the newly calibrated
+`fog2` corpus:
+
+| corpus | clear | fog | night | argmax = fog |
+|---|---:|---:|---:|---:|
+| clear | 0.471 | 0.289 | 0.253 | 0.7 % |
+| fog **OLD** (Hazy-DIOR release) | 0.361 | 0.342 | 0.290 | **36.5 %** |
+| fog2 **NEW** (calibrated ASM) | 0.295 | **0.386** | 0.312 | **66.4 %** |
+| night | 0.252 | 0.251 | 0.521 | 1.0 % |
+
+Fog-branch probability above clear: **+0.053 → +0.097**. Routing accuracy nearly
+doubles, with no false positives introduced on clear (0.7 %) or night (1.0 %).
+
+**The router was not the problem; the data was.** A weak degradation cannot be
+routed because there is nothing to detect, and the 38.5 % fog accuracy reported
+in `results-conditional-gating.md` was measuring the corpus rather than the gate.
+
+Residual gap: real haze (RRSHID) still routes at 98–100 % against `fog2`'s
+66.4 %, so the calibrated synthesis is closer to real but not equivalent —
+consistent with its contrast falling further than real haze (−23.2 vs −13.4).
+Matching the dark channel is not the same as matching haze.
