@@ -51,6 +51,7 @@ def stratified_subset(
     n: int,
     seed: int = 0,
     min_per_class: int = 3,
+    class_names: list[str] | tuple[str, ...] | None = None,
 ) -> tuple[list[Path], dict[str, int]]:
     """Pick `n` images covering as many classes as possible.
 
@@ -62,7 +63,14 @@ def stratified_subset(
         seed: sampling seed.
         min_per_class: how many images to try to guarantee per class before
             topping up randomly.
+        class_names: names for the label indices. Defaults to DIOR's. Passing
+            the corpus's own names matters for any non-DIOR dataset: with the
+            default, class 0 of a 2-class corpus is reported as "airplane", and
+            the caller's "which classes are missing?" check then compares two
+            different vocabularies and warns that every class is absent while
+            simultaneously reporting them all present.
     """
+    names = list(class_names) if class_names else list(DIOR_CLASSES)
     rng = random.Random(seed)
 
     images = sorted(
@@ -110,7 +118,7 @@ def stratified_subset(
     counts = Counter()
     for p in selected:
         for c in by_image[p]:
-            counts[DIOR_CLASSES[c]] += 1
+            counts[names[c] if c < len(names) else f"class_{c}"] += 1
 
     return selected, dict(counts)
 

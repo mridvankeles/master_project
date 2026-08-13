@@ -76,11 +76,13 @@ def build_subset_data_yaml(cfg: RunConfig) -> Path:
     root = cfg.dataset_root / cfg.condition
     out_dir = ensure_dir(cfg.dataset_root / "subsets")
 
+    names = class_names_for(cfg)
     lists: dict[str, Path] = {}
     for split, n in (cfg.subset or {}).items():
-        picks, counts = stratified_subset(root / "images" / split, n=int(n), seed=cfg.seed)
+        picks, counts = stratified_subset(
+            root / "images" / split, n=int(n), seed=cfg.seed, class_names=names
+        )
         lists[split] = write_image_list(picks, out_dir / f"{cfg.run_name}_{split}.txt")
-        names = class_names_for(cfg)
         missing = [c for c in names if c not in counts]
         log.info(
             "subset %-5s: %d images, %d/%d classes present",
