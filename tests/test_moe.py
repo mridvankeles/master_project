@@ -163,3 +163,18 @@ def test_experts_have_heterogeneous_kernels():
     assert block.kernels == (3, 5)
     sizes = {e[0][0].kernel_size for e in block.experts}
     assert len(sizes) == 2
+
+
+def test_condition_aliases_resolve_to_their_branch():
+    """`fog2` is still fog.
+
+    Without the alias the filename token matches no branch, every sample is
+    masked out of the gate supervision, and the gate trains on nothing while
+    reporting a perfectly healthy loss.
+    """
+    from src.models.moe2 import condition_from_paths
+
+    assert condition_from_paths(["fog2_00042_x.jpg"]).tolist()[0] == [0.0, 1.0, 0.0]
+    assert condition_from_paths(["dark_00009.jpg"]).tolist()[0] == [0.0, 0.0, 1.0]
+    # An unrecognised prefix must stay all-zero so it is masked, not mislabelled.
+    assert condition_from_paths(["00008.jpg"]).tolist()[0] == [0.0, 0.0, 0.0]

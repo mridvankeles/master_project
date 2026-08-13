@@ -1,0 +1,36 @@
+# Static experts (clear/fog/night) + always-on shared branch + SUPERVISED multi-label gate.
+#
+# Acceptance criteria BEFORE accuracy is looked at (analyse_routing.py):
+#   NMI(route ; condition) > 0, inter-expert CKA < 1, route not concentrated.
+# Matched to its control in every training hyperparameter: same data, epochs,
+# batch, schedule, seed and pretrained weights. Only the lines noted below differ.
+
+run_name: cond3b_gated_yolo11n
+experiment: dior-hbb-full
+condition: union3b
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb_cond3.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000
+gate:
+  lambda: 1.0

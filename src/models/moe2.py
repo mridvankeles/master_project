@@ -41,6 +41,13 @@ __all__ = ["CondMoEBlock", "gate_supervision_loss", "condition_from_paths"]
 # the supervision target is built from it.
 CONDITION_ORDER = ("clear", "fog", "night")
 
+# Corpus directory names that denote the same physical condition as a branch.
+# `fog2` is the calibrated ASM synthesis; it is still fog, and without this the
+# filename token would match no branch, every sample would be masked out of the
+# supervision, and the gate would train on nothing while reporting a healthy
+# loss. Aliases are resolved to the branch they belong to.
+CONDITION_ALIASES = {"fog2": "fog", "haze": "fog", "dark": "night", "lowlight": "night"}
+
 
 def condition_from_paths(paths, order=CONDITION_ORDER) -> torch.Tensor:
     """Multi-hot condition targets from union-corpus filenames.
@@ -54,7 +61,7 @@ def condition_from_paths(paths, order=CONDITION_ORDER) -> torch.Tensor:
     rows = []
     for p in paths:
         stem = os.path.basename(str(p)).rsplit(".", 1)[0].lower()
-        tokens = set(stem.split("_"))
+        tokens = {CONDITION_ALIASES.get(t, t) for t in stem.split("_")}
         row = [1.0 if c in tokens else 0.0 for c in order]
         if not any(row):
             # Single-condition corpus: no prefix to read, so supervision is
