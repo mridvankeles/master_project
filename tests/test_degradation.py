@@ -108,3 +108,58 @@ def test_rejects_non_uint8_input():
     except TypeError:
         return
     raise AssertionError("expected TypeError on float input")
+
+
+# --- fog ------------------------------------------------------------------
+
+
+def test_fog_is_deterministic_per_image_id():
+    from src.data.degradation import sample_fog_params
+
+    assert sample_fog_params("00042") == sample_fog_params("00042")
+    assert sample_fog_params("00042") != sample_fog_params("00043")
+
+
+def test_fog_raises_dark_channel_into_the_real_range():
+    """Calibration guard, and the reason this synthesiser exists.
+
+    The Hazy-DIOR release raises the dark channel by only +36.8 / +62.3 / +93.0
+    for its three tiers, while real haze (RRSHID) raises it +100.5 (moderate)
+    and +142.8 (thick). A corpus that fails this assertion is too easy, and a
+    router trained on it will look broken when it is really the data that is.
+    """
+    from src.data.degradation import apply_fog, fog_statistics, sample_fog_params
+
+    rng = np.random.default_rng(0)
+    deltas = []
+    for i in range(12):
+        img = _image(i)
+        stats = fog_statistics(img, apply_fog(img, sample_fog_params(f"{i:05d}")))
+        deltas.append(stats["darkchannel_delta"])
+        assert stats["contrast_delta"] < 0, "haze must reduce contrast"
+    assert 55 < float(np.mean(deltas)) < 165, f"mean dark-channel delta {np.mean(deltas)}"
+
+
+def test_fog_is_spatially_non_uniform():
+    """Real haze is not a flat veil, and a spatial fog expert needs variation.
+
+    Compared against the same image hazed with the relief switched off.
+    """
+    from dataclasses import replace
+
+    from src.data.degradation import apply_fog, sample_fog_params
+
+    img = _image(3)
+    p = sample_fog_params("00003")
+    varied = apply_fog(img, p).astype(np.float32)
+    flat = apply_fog(img, replace(p, depth_relief=0.0)).astype(np.float32)
+    # The residual between the two is the spatial component of the haze.
+    assert np.abs(varied - flat).mean() > 0.5
+
+
+def test_fog_preserves_shape_and_dtype():
+    from src.data.degradation import apply_fog, sample_fog_params
+
+    img = _image(1)
+    out = apply_fog(img, sample_fog_params("x"))
+    assert out.shape == img.shape and out.dtype == np.uint8

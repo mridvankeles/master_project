@@ -1,4 +1,4 @@
-"""Synthesise the `night` condition from the clear corpus.
+"""Synthesise a degraded condition (`night` or `fog2`) from the clear corpus.
 
     python scripts/make_night.py --scope full --task detect
 
@@ -31,8 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.build_dataset import SPLITS, write_data_yaml  # noqa: E402
 from src.data.degradation import (  # noqa: E402
+    apply_fog,
     apply_night,
+    fog_statistics,
     night_statistics,
+    sample_fog_params,
     sample_night_params,
 )
 from src.utils.logging import get_logger  # noqa: E402
@@ -43,20 +46,26 @@ log = get_logger("make_night")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png"}
 
 
-def _one(job: tuple[str, str, str, int]) -> dict | None:
-    """Worker: read a clear image, darken it, write it, return its record."""
+def _one(job: tuple[str, str, str, int, str]) -> dict | None:
+    """Worker: read a clear image, degrade it, write it, return its record."""
     import cv2
 
-    src_s, dst_s, image_id, seed = job
+    src_s, dst_s, image_id, seed, kind = job
     src, dst = Path(src_s), Path(dst_s)
     bgr = cv2.imread(str(src))
     if bgr is None:
         return None
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
-    params = sample_night_params(image_id, seed=seed)
-    night = apply_night(rgb, params)
-    stats = night_statistics(rgb, night)
+    if kind == "fog2":
+        params = sample_fog_params(image_id, seed=seed)
+        out = apply_fog(rgb, params)
+        stats = fog_statistics(rgb, out)
+    else:
+        params = sample_night_params(image_id, seed=seed)
+        out = apply_night(rgb, params)
+        stats = night_statistics(rgb, out)
+    night = out
 
     # JPEG at high quality: the clear source is already JPEG, so writing PNG
     # here would give the night condition a different compression history from
@@ -74,6 +83,8 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--limit", type=int, default=None, help="debug: cap images per split")
+    parser.add_argument("--kind", default="night", choices=["night", "fog2"],
+                        help="which degradation to synthesise")
     args = parser.parse_args()
 
     root = dataset_root(args.task, args.scope)
@@ -85,14 +96,14 @@ def main() -> int:
     jobs: list[tuple[str, str, str, int]] = []
     for split in SPLITS:
         src_dir = clear / "images" / split
-        dst_dir = ensure_dir(root / "night" / "images" / split)
+        dst_dir = ensure_dir(root / args.kind / "images" / split)
         lbl_src = clear / "labels" / split
-        lbl_dst = ensure_dir(root / "night" / "labels" / split)
+        lbl_dst = ensure_dir(root / args.kind / "labels" / split)
         images = sorted(p for p in src_dir.iterdir() if p.suffix.lower() in IMAGE_EXTS)
         if args.limit:
             images = images[: args.limit]
         for p in images:
-            jobs.append((str(p), str(dst_dir / f"{p.stem}.jpg"), p.stem, args.seed))
+            jobs.append((str(p), str(dst_dir / f"{p.stem}.jpg"), p.stem, args.seed, args.kind))
             # Labels are copied verbatim: darkness does not move objects.
             (lbl_dst / f"{p.stem}.txt").write_text(
                 (lbl_src / f"{p.stem}.txt").read_text(encoding="utf-8"), encoding="utf-8"
@@ -108,7 +119,7 @@ def main() -> int:
             if i % 4000 == 0:
                 log.info("  %s/%s", f"{i:,}", f"{len(jobs):,}")
 
-    manifest = root / "night" / "manifest_night.csv"
+    manifest = root / args.kind / f"manifest_{args.kind}.csv"
     with manifest.open("w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
         w.writeheader()
@@ -117,21 +128,31 @@ def main() -> int:
 
     import numpy as np
 
-    ratio = np.array([r["brightness_ratio"] for r in rows])
-    hf_c = np.array([r["highfreq_clear"] for r in rows])
-    hf_n = np.array([r["highfreq_night"] for r in rows])
-    log.info("brightness ratio: mean %.3f  p05 %.3f  p95 %.3f", ratio.mean(),
-             np.percentile(ratio, 5), np.percentile(ratio, 95))
-    log.info("high-freq energy: clear %.2f -> night %.2f (sensor noise retained)",
-             hf_c.mean(), hf_n.mean())
-    if ratio.mean() > 0.6:
-        log.error("night images are not dark enough — check the exposure range")
-        return 1
+    if args.kind == "fog2":
+        d = np.array([r["darkchannel_delta"] for r in rows])
+        log.info("dark-channel delta: mean %+.1f  p10 %+.1f  p90 %+.1f",
+                 d.mean(), np.percentile(d, 10), np.percentile(d, 90))
+        log.info("  reference: real moderate +100.5, real thick +142.8; "
+                 "old release +36.8/+62.3/+93.0")
+        if d.mean() < 55:
+            log.error("fog is too weak to be worth generating — check beta")
+            return 1
+    else:
+        ratio = np.array([r["brightness_ratio"] for r in rows])
+        hf_c = np.array([r["highfreq_clear"] for r in rows])
+        hf_n = np.array([r["highfreq_night"] for r in rows])
+        log.info("brightness ratio: mean %.3f  p05 %.3f  p95 %.3f", ratio.mean(),
+                 np.percentile(ratio, 5), np.percentile(ratio, 95))
+        log.info("high-freq energy: clear %.2f -> night %.2f (sensor noise retained)",
+                 hf_c.mean(), hf_n.mean())
+        if ratio.mean() > 0.6:
+            log.error("night images are not dark enough — check the exposure range")
+            return 1
 
     suffix = "" if args.task == "detect" else "_obb"
     scope = "" if args.scope == "aligned" else f"_{args.scope}"
-    dst = write_data_yaml(root, "night",
-                          CONFIG_DIR / "data" / f"dior_night{suffix}{scope}.yaml", task=args.task)
+    dst = write_data_yaml(root, args.kind,
+                          CONFIG_DIR / "data" / f"dior_{args.kind}{suffix}{scope}.yaml", task=args.task)
     log.info("wrote %s", dst)
     return 0
 
