@@ -24,6 +24,13 @@ Twelve full training runs and 40+ evaluations were completed. The main results:
 4. **The remaining routing error was traced to the data, not the model.** Our
    synthetic haze was weaker than real haze; strengthening it raised routing
    from 36.5% to 66.4% **with no retraining**.
+5. **Re-synthesising fog at real strength reopened the interference claim.** The
+   fog deficit against a specialist grew from +0.0016 to **+0.0235** — a 15x
+   change from a data fix alone, bringing fog in line with clear (+0.0225) and
+   night (+0.0208).
+6. **First result on real, non-simulated low light:** 93.3% retention at mAP50
+   but only 78.9% at mAP50-95 — detection survives darkness, localisation does
+   not.
 
 Every number below is regenerable from a script, and every run is logged to
 MLflow with dataset and model content fingerprints.
@@ -201,7 +208,39 @@ large objects. Aggregate mAP would have recorded this as a clean win.
 
 ---
 
-## Step 8 — Real low-light data (in progress)
+## Step 8 — Calibrated fog reopens the interference claim ✅
+
+Fog re-synthesised with the atmospheric scattering model at real strength
+(dark-channel +110 vs the release's +37/+62/+93). Model, schedule, budget and
+seed unchanged, so haze strength is the only variable.
+
+| condition | specialist | union (dense) | deficit |
+|---|---:|---:|---:|
+| clear | 0.6984 | 0.6760 | +0.0225 |
+| night | 0.6612 | 0.6405 | +0.0208 |
+| fog — weak (release) | 0.6594 | 0.6578 | **+0.0016** |
+| fog — **calibrated** | **0.6883** | 0.6648 | **+0.0235** |
+
+**The fog deficit grows 15x from a data fix alone.** Step 3's conclusion that
+fog showed "essentially no interference" was an artefact of a corpus whose
+thickest setting was weaker than real *moderate* haze. All three conditions now
+sit at a consistent ~2-point deficit.
+
+A confound was checked rather than assumed: the specialist sees 3.00x the union
+model's unique scenes for clear, night and calibrated fog alike, and only 2.39x
+for weak fog. At identical ratios the three deficits land within 0.003 of each
+other; weak fog should have shown ~+0.018 on diversity alone and shows +0.0016.
+Diversity cannot explain a 15x difference.
+
+Routing improved too — NMI **0.473 → 0.542**, gate activation roughly doubled.
+
+**But the MoE still does not exploit it** (−0.0033 on fog2, −0.0044 on union3b).
+That is now a far more informative negative than before: interference exists,
+the router routes, the experts differ — and the block still does not convert
+that into accuracy. The prime suspect is gate calibration: only 0.466 experts
+activate per image, so most images pass through the shared branch alone.
+
+## Step 9 — Real low-light data ✅
 
 DroneVehicle converted into the pipeline: de-letterboxed (44% of every frame was
 white padding), oriented→horizontal boxes, split by measured brightness.
@@ -211,6 +250,18 @@ This also exposed a defect in our night synthesis: brightness matches real night
 almost exactly (30.2 vs 32.4) but **contrast is 3.5× too low** (12.8 vs 44.5) —
 real night is dark *and* high-contrast because light sources saturate, whereas
 ours is uniformly dimmed.
+
+**Result on real low light** (matched budget, 60 epochs, full test split):
+
+| | mAP50 | mAP50-95 |
+|---|---:|---:|
+| dark (brightness 32.5) | 0.8567 | 0.5324 |
+| lit (brightness 118.9) | 0.9184 | 0.6752 |
+| **retention** | **93.3%** | **78.9%** |
+
+Detection survives darkness; precise localisation does not. The headline metric
+hides that split entirely, and a uniformly-dimmed synthesis would not reproduce
+it.
 
 ---
 
@@ -227,12 +278,28 @@ ours is uniformly dimmed.
 - **Corrections made during the work:** an ISO-gain error that left night images
   only 11% darker; a scope bug that would have trained on 651 images while
   logging 5,862; a claim that DroneVehicle was unusable, disproved by looking at
-  the images after the statistics were corrupted by padding.
+  the images after white letterbox padding corrupted the statistics; three
+  places where DIOR's class names were hardcoded, which mislabelled every
+  per-class row of a 2-class corpus while leaving the aggregate metrics correct;
+  and two evaluation cells that silently fell back to the wrong data config and
+  were caught only because they reported byte-identical numbers.
+
+  These are listed because the pattern matters more than any one of them: in
+  every case the aggregate number looked reasonable and the error was only
+  visible in a disaggregated view.
 
 ## What the evidence supports today
 
 Condition-conditional computation **is achievable** in this network, using
 supervision that costs nothing, and it is **measurable** in two independent ways.
-Whether it *helps* — in efficiency or in robustness under drift — is still open,
-but is now testable for the first time: a router that never routed could not
-have demonstrated either.
+
+The interference the design targets **does exist** — about 2 points on each of
+clear, fog and night — once each condition genuinely degrades the image. The
+router routes (NMI 0.54) and the experts compute different functions (CKA 0.83).
+
+**The MoE nonetheless does not yet convert any of that into accuracy.** That is
+the open problem, and it has moved from the premise to the block: the most
+likely cause is that the gate is miscalibrated, so only 0.466 experts activate
+per image and most images never reach a specialised branch at all. Fixing that
+is a loss-weighting change rather than a redesign, and it is the next
+experiment.
