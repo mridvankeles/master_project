@@ -232,9 +232,15 @@ condition), and the gate costs 771 parameters.
 **Does not work yet:** the block does not convert any of that into accuracy —
 0.6583 against the dense control's 0.6627 on the same data.
 
-**Most likely cause, and the next experiment:** the gate is *miscalibrated*, not
-wrong. Mean gate probabilities are maximal on the correct branch but only reach
-0.336, so at the 0.5 threshold **only 0.466 experts activate per image** — most
-images pass through the shared branch alone and never reach a specialised one.
-With 3 outputs and one positive, BCE is minimised by predicting low. The fix is
-`pos_weight ~ 2`, a loss-weighting change rather than a redesign.
+**Most likely cause — SUPERSEDED, see `results-routing-cost.md`.** The original
+diagnosis here was that the gate predicted uniformly low. That was measured and
+found wrong: `sum(p)` is already 1.012, so the total probability mass is
+correct. The gate **spreads** it — roughly (0.50, 0.29, 0.22) rather than
+(1.0, 0, 0) — so the maximum barely clears the 0.5 threshold.
+
+A routing cost was implemented and run (`cond3c_cost_yolo11n`). It improved
+every routing metric (NMI 0.542 -> 0.596, fog purity 0.596 -> 0.682) and made
+accuracy slightly **worse** (0.6583 -> 0.6558). That is now the third
+intervention to improve routing without improving detection, so the open problem
+has moved again: **routing quality and accuracy have decoupled**, and the next
+work belongs on the experts, not the router.

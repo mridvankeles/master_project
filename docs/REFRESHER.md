@@ -75,14 +75,20 @@ stage.**
 
 ## The one thing that is still wrong
 
-**The gate is miscalibrated, not incorrect.** Probabilities are maximal on the
-right branch but top out around 0.336, so at threshold 0.5 only **0.466 experts
-activate per image** — most images pass through the shared branch alone and never
-reach a specialist. With three outputs and one positive, BCE is minimised by
-predicting low.
+**Routing quality and accuracy have decoupled.** Three interventions have now
+raised NMI (0.000 -> 0.473 -> 0.542 -> 0.596) and not one has raised accuracy;
+the last moved it down. Better routing is not translating into better detection.
 
-**Next experiment:** `pos_weight ~ 2` in the gate BCE, re-measure activation and
-accuracy. A loss-weighting change, not a redesign. Roughly 75 minutes.
+An earlier diagnosis here -- "the gate predicts uniformly low" -- was measured
+and found **wrong**: `sum(p)` is already 1.012. The gate spreads its mass
+(0.50 / 0.29 / 0.22) instead of concentrating it, so the maximum barely clears
+the 0.5 threshold. A routing cost aimed at the sum therefore addressed a
+non-problem.
+
+**Next experiments** target the experts rather than the router: decouple
+selection from magnitude (experts currently run at ~half strength because their
+output is scaled by the gate probability), sweep the gate weight down from 1.0,
+and widen the experts, since inter-expert CKA is still 0.82-0.96.
 
 ---
 
