@@ -35,7 +35,7 @@ import torch.nn as nn
 
 from .experts import StaticExpert
 
-__all__ = ["CondMoEBlock", "gate_supervision_loss", "condition_from_paths"]
+__all__ = ["CondMoEBlock", "gate_supervision_loss", "routing_cost", "condition_from_paths"]
 
 # Order is load-bearing: it fixes which output unit means which condition, and
 # the supervision target is built from it.
@@ -165,7 +165,9 @@ def cond_moe_blocks(model: nn.Module) -> list[CondMoEBlock]:
     return [m for m in model.modules() if isinstance(m, CondMoEBlock)]
 
 
-def gate_supervision_loss(model: nn.Module, targets: torch.Tensor) -> torch.Tensor | float:
+def gate_supervision_loss(
+    model: nn.Module, targets: torch.Tensor, pos_weight: float = 1.0
+) -> torch.Tensor | float:
     """Binary cross-entropy between clean gate logits and condition labels.
 
     This is what makes branch i *mean* condition i. The entropy auxiliary used
@@ -186,8 +188,75 @@ def gate_supervision_loss(model: nn.Module, targets: torch.Tensor) -> torch.Tens
         valid = t.sum(1) > 0
         if not valid.any():
             continue
-        total = total + nn.functional.binary_cross_entropy_with_logits(lg[valid], t[valid])
+        pw = None
+        if pos_weight != 1.0:
+            # With 3 outputs and typically 1 positive, two thirds of every
+            # target is zero and BCE is minimised by predicting low. Weighting
+            # positives by (n_experts - 1) restores the balance between the
+            # positive and negative halves of the objective.
+            pw = torch.full((lg.shape[1],), float(pos_weight), device=lg.device, dtype=lg.dtype)
+        total = total + nn.functional.binary_cross_entropy_with_logits(
+            lg[valid], t[valid], pos_weight=pw
+        )
     return total / max(len(logits), 1)
+
+
+def routing_cost(
+    model: nn.Module,
+    targets: torch.Tensor,
+    weight_count: float = 1.0,
+) -> torch.Tensor | float:
+    """Charge the gate for activating the wrong NUMBER of experts.
+
+    THE PROBLEM THIS SOLVES
+    -----------------------
+    The supervised BCE says *which* branch should fire; nothing says *how many*.
+    With three outputs and typically one positive, two thirds of every target is
+    zero, so BCE is minimised by predicting uniformly low. Measured on
+    `cond3b_gated`: probabilities peak on the correct branch but reach only
+    0.336, so at a 0.5 threshold **0.466 experts activate per image** and most
+    images reach no specialist at all. The gate is miscalibrated, not wrong.
+
+    THE TERM
+    --------
+        L_count = | sum_i p_i  -  n_true |
+
+    `n_true` is the number of conditions actually present, read from the same
+    free filename labels. So it is one term doing two jobs, which is exactly the
+    pair of costs asked for:
+
+    * a **coverage** cost when too few experts fire (sum below n_true) --
+      "choosing no expert" is charged for;
+    * a **sparsity** cost when too many fire (sum above n_true) -- routing
+      through experts the image does not need is charged for.
+
+    Using the label rather than a constant matters: a compound `fog_night`
+    image has n_true = 2, so the term asks for two experts there and one
+    elsewhere, instead of forcing every image to a single route. That is what
+    keeps the multi-label design intact.
+
+    Relation to the literature: this is a supervised form of the per-sample
+    sparsity / commitment losses used in sparse MoE, where the target count is
+    normally a fixed k. Load-balancing terms (Switch, CV-based) constrain usage
+    across a BATCH and cannot fix a per-image calibration error, which is why
+    they were not the right tool here.
+    """
+    blocks = cond_moe_blocks(model)
+    gates = [b.last_gate for b in blocks if b.last_gate is not None]
+    if not gates or weight_count == 0:
+        return 0.0
+    total = 0.0
+    for g in gates:
+        t = targets.to(g.device, g.dtype)
+        if t.shape != g.shape:
+            continue
+        valid = t.sum(1) > 0
+        if not valid.any():
+            continue
+        n_true = t[valid].sum(1)
+        n_active = g[valid].sum(1)
+        total = total + (n_active - n_true).abs().mean()
+    return weight_count * total / max(len(gates), 1)
 
 
 def routing_report(model: nn.Module) -> dict[str, float]:
@@ -200,4 +269,9 @@ def routing_report(model: nn.Module) -> dict[str, float]:
         for e, kind in enumerate(block.expert_kinds):
             out[f"moe{b_i}/{kind}_active"] = float(act[:, e].mean())
         out[f"moe{b_i}/experts_per_image"] = float(act.sum(1).mean())
+        if block.last_gate is not None:
+            # Expected count is threshold-free: it shows whether the gate is
+            # confident, independently of where the cut is placed.
+            out[f"moe{b_i}/expected_experts"] = float(block.last_gate.sum(1).mean())
+            out[f"moe{b_i}/gate_max_prob"] = float(block.last_gate.max(1).values.mean())
     return out

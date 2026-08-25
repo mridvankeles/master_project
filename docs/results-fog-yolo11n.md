@@ -36,6 +36,7 @@ val and test are disjoint DIOR id ranges (val 05863–11725, test 11726–23463)
 the model saw only 651 unique scenes in training. Treat **test** as the honest
 number and val as a tuning signal only.
 
+
 **2. It had not converged.** Best epoch = **100 of 100**; mAP50 was still rising
 at the last epoch and `patience: 30` never triggered. The run is
 under-trained, not over-trained — a longer schedule should improve it. Training

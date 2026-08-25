@@ -55,6 +55,11 @@ class MoEDetectionTrainer(DetectionTrainer):
         # condition i; the entropy auxiliary only ever asked for balance, which
         # a gate splitting on anything at all satisfies equally well.
         self.gate_lambda = float(overrides.pop("gate_lambda", 0.0))
+        # Calibration knobs for the gate. pos_weight rebalances the BCE;
+        # count_lambda charges the gate for firing the wrong NUMBER of experts.
+        self.gate_pos_weight = float(overrides.pop("gate_pos_weight", 1.0))
+        self.gate_count_lambda = float(overrides.pop("gate_count_lambda", 0.0))
+        self._last_count_loss = 0.0
         self.nwd_mode = str(overrides.pop("nwd", "off"))
         self.nwd_c = float(overrides.pop("nwd_c", 12.8))
         self.nwd_tiny_area = float(overrides.pop("nwd_tiny_area", 32.0**2))
@@ -135,7 +140,14 @@ class MoEDetectionTrainer(DetectionTrainer):
                  and b.last_logits.shape[0] != targets.shape[0]]
         if stale:
             return total
-        loss = gate_supervision_loss(model, targets)
+        loss = gate_supervision_loss(model, targets, pos_weight=self.gate_pos_weight)
+        if self.gate_count_lambda:
+            from .moe2 import routing_cost
+
+            cost = routing_cost(model, targets, weight_count=self.gate_count_lambda)
+            if isinstance(cost, torch.Tensor):
+                self._last_count_loss = float(cost.detach())
+                loss = loss + cost
         if isinstance(loss, torch.Tensor):
             self._last_gate_loss = float(loss.detach())
             term = self.gate_lambda * loss
@@ -217,6 +229,7 @@ class MoEDetectionTrainer(DetectionTrainer):
         out = {k: v / self._epoch_batches for k, v in self._epoch_shares.items()}
         out["moe/aux_loss"] = self._last_aux
         out["moe/gate_loss"] = getattr(self, "_last_gate_loss", 0.0)
+        out["moe/count_loss"] = getattr(self, "_last_count_loss", 0.0)
         out.update(self._cond_report)
         # min share across experts: one number that says "is anything dying?"
         shares = [v for k, v in out.items() if k.endswith("_share")]

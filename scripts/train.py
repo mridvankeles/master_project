@@ -227,7 +227,11 @@ def main() -> int:
                 mlflow.log_params({f"moe_{k}": v for k, v in cfg.moe.items()})
                 log.info("MoE run: %s", cfg.moe)
             if cfg.gate:
-                train_args.update(gate_lambda=cfg.gate.get("lambda", 1.0))
+                train_args.update(
+                    gate_lambda=cfg.gate.get("lambda", 1.0),
+                    gate_pos_weight=cfg.gate.get("pos_weight", 1.0),
+                    gate_count_lambda=cfg.gate.get("count_lambda", 0.0),
+                )
                 mlflow.log_params({f"gate_{k}": v for k, v in cfg.gate.items()})
                 log.info("gate config: %s", cfg.gate)
             if cfg.loss:
