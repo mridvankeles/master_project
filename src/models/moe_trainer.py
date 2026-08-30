@@ -68,6 +68,12 @@ class MoEDetectionTrainer(DetectionTrainer):
         self.nwd_mode = str(overrides.pop("nwd", "off"))
         self.nwd_c = float(overrides.pop("nwd_c", 12.8))
         self.nwd_tiny_area = float(overrides.pop("nwd_tiny_area", 32.0**2))
+        # Paired restoration: teach the fog/night branches to reproduce the
+        # block output of their CLEAR TWIN. Gives the experts an objective the
+        # always-on branch cannot absorb, which is why design 2's were inert.
+        self.restore_lambda = float(overrides.pop("restore_lambda", 0.0))
+        self.restore_beta = float(overrides.pop("restore_beta", 0.1))
+        self._last_restore = 0.0
         self.nwd_levels = str(overrides.pop("nwd_levels", "all"))
         self.nwd_p3_weight = float(overrides.pop("nwd_p3_weight", 1.0))
         self._nwd_installed = False
@@ -93,7 +99,8 @@ class MoEDetectionTrainer(DetectionTrainer):
             f" p3w={self.nwd_p3_weight}"
         )
         use_aux = self.moe_lambda != 0 and bool(blocks)
-        gate_active = (self.gate_lambda or self.gate_floor_lambda) and cond_blocks
+        gate_active = (self.gate_lambda or self.gate_floor_lambda
+                       or self.restore_lambda) and cond_blocks
         if not use_aux and self.nwd_mode == "off" and not gate_active:
             LOGGER.warning("MoE trainer: neither auxiliary loss nor NWD is active")
             return model
@@ -116,11 +123,15 @@ class MoEDetectionTrainer(DetectionTrainer):
                 if not ok:
                     LOGGER.error("NWD requested but the criterion had no bbox_loss")
                 total_first = self._add_gate_supervision(model, total_first, batch)
-                return self._finish(model, total_first, items_first, use_aux)
+                total_first, items_first = self._finish(model, total_first, items_first, use_aux)
+                return self._add_restoration(model, total_first, batch), items_first
 
             total, items = inner_loss(batch, preds)
             total = self._add_gate_supervision(model, total, batch)
-            return self._finish(model, total, items, use_aux)
+            # _finish reads the block's routing state, so it must run BEFORE the
+            # twin forward pass overwrites it.
+            total, items = self._finish(model, total, items, use_aux)
+            return self._add_restoration(model, total, batch), items
 
         model.loss = loss_with_aux
         return model
@@ -174,6 +185,71 @@ class MoEDetectionTrainer(DetectionTrainer):
                 self._last_floor_loss = float(floor.detach())
                 term = term + self.gate_floor_lambda * floor
         if isinstance(term, torch.Tensor):
+            if isinstance(total, torch.Tensor) and total.ndim > 0:
+                total = total.clone()
+                total[0] = total[0] + term
+            else:
+                total = total + term
+        return total
+
+    def build_dataset(self, img_path, mode="train", batch=None):
+        """Training set carries each degraded image's clear twin when asked to.
+
+        Train only. The validator has no use for the extra key and would have to
+        be taught to ignore it.
+        """
+        ds = super().build_dataset(img_path, mode, batch)
+        if self.restore_lambda == 0 or mode != "train":
+            return ds
+        from .paired import PairedYOLODataset
+
+        if getattr(self.args, "mosaic", 0.0):
+            LOGGER.warning("restore_lambda is set but mosaic is ON: the twin cannot be "
+                           "given the same augmentation, so the pairing is invalid")
+        # Reassigning __class__ keeps the already-scanned labels and cache, but
+        # skips __init__, so the twin index is attached explicitly.
+        from .paired import attach_twins
+
+        ds.__class__ = PairedYOLODataset
+        n = attach_twins(ds)
+        LOGGER.info(f"paired restoration: {n}/{ds.n_sampled} degraded samples have a "
+                    f"clear twin ({ds.ni - ds.n_sampled} twins appended as targets)")
+        return ds
+
+    def _add_restoration(self, model, total, batch):
+        """SmoothL1 between the block output on a degraded image and on its twin.
+
+        Runs LAST in the loss wrapper: the twin forward pass overwrites the
+        block's stashed routing state, so gate supervision and utilisation
+        logging have to have finished first.
+        """
+        if self.restore_lambda == 0 or not model.training:
+            return total
+        from .moe2 import cond_moe_blocks
+        from .paired import condition_token, restoration_loss
+
+        blocks = cond_moe_blocks(model)
+        twin = batch.get("twin_img") if isinstance(batch, dict) else None
+        if not blocks or twin is None or blocks[0].last_out is None:
+            return total
+        blk = blocks[0]
+        student = blk.last_out
+        paths = batch.get("im_file") or []
+        degraded = torch.tensor([condition_token(f) in ("fog", "night") for f in paths],
+                                device=student.device)
+        if degraded.shape[0] != student.shape[0] or not degraded.any():
+            return total
+
+        with torch.no_grad():
+            model(twin.to(student.device, non_blocking=True).float() / 255)
+            target = blk.last_out
+        if target is None or target.shape != student.shape:
+            return total
+
+        loss = restoration_loss(student, target, degraded, beta=self.restore_beta)
+        if isinstance(loss, torch.Tensor):
+            self._last_restore = float(loss.detach())
+            term = self.restore_lambda * loss
             if isinstance(total, torch.Tensor) and total.ndim > 0:
                 total = total.clone()
                 total[0] = total[0] + term
@@ -254,6 +330,7 @@ class MoEDetectionTrainer(DetectionTrainer):
         out["moe/gate_loss"] = getattr(self, "_last_gate_loss", 0.0)
         out["moe/count_loss"] = getattr(self, "_last_count_loss", 0.0)
         out["moe/floor_loss"] = getattr(self, "_last_floor_loss", 0.0)
+        out["moe/restore_loss"] = getattr(self, "_last_restore", 0.0)
         out.update(self._cond_report)
         # min share across experts: one number that says "is anything dying?"
         shares = [v for k, v in out.items() if k.endswith("_share")]

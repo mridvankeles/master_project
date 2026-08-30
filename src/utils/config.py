@@ -45,6 +45,11 @@ class RunConfig:
     # Supervised gating, e.g. {"lambda": 1.0}. Uses the condition labels already
     # present in union-corpus filenames.
     gate: dict[str, Any] | None = None
+    # Paired degraded/clear supervision, e.g. {"lambda": 1.0, "beta": 0.1}.
+    # Teaches the fog/night experts to reproduce the block output of the same
+    # scene's clear rendering -- dehazing and light-invariance with ground truth,
+    # using pairs the corpus already contains.
+    restore: dict[str, Any] | None = None
     # Explicit data yaml, for corpora that do not follow the DIOR naming
     # convention (DroneVehicle, for instance). Overrides the derived path.
     data: str | None = None
@@ -135,5 +140,6 @@ def load_run_config(path: str | Path) -> RunConfig:
         moe=raw.get("moe"),
         loss=raw.get("loss"),
         gate=raw.get("gate"),
+        restore=raw.get("restore"),
         data=raw.get("data"),
     )

@@ -215,7 +215,7 @@ def main() -> int:
         # live in a DetectionTrainer subclass. Selected by the config's `moe:`
         # block so a stock run and an MoE run differ by configuration only.
         trainer_cls = None
-        if cfg.moe or cfg.loss or cfg.gate:
+        if cfg.moe or cfg.loss or cfg.gate or cfg.restore:
             from src.models.moe_trainer import MoEDetectionTrainer
 
             trainer_cls = MoEDetectionTrainer
@@ -236,6 +236,13 @@ def main() -> int:
                 )
                 mlflow.log_params({f"gate_{k}": v for k, v in cfg.gate.items()})
                 log.info("gate config: %s", cfg.gate)
+            if cfg.restore:
+                train_args.update(
+                    restore_lambda=cfg.restore.get("lambda", 0.0),
+                    restore_beta=cfg.restore.get("beta", 0.1),
+                )
+                mlflow.log_params({f"restore_{k}": v for k, v in cfg.restore.items()})
+                log.info("restoration config: %s", cfg.restore)
             if cfg.loss:
                 train_args.update(
                     nwd=cfg.loss.get("nwd", "off"),

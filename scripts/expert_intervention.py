@@ -61,7 +61,10 @@ def patched_forward(blk, mode: str):
 
         if mode == "gate":
             active = (probs > blk.threshold).float()
-            weight = probs
+            # Mirror the block's own weighting: hard_mask runs a selected branch
+            # at full strength, so replaying it with p would understate the
+            # experts and bias the intervention towards "they do nothing".
+            weight = active if getattr(blk, "hard_mask", False) else probs
         elif mode == "none":
             active = torch.zeros_like(probs)
             weight = probs
@@ -77,14 +80,19 @@ def patched_forward(blk, mode: str):
             weight = torch.ones_like(probs)
         blk.last_active = active
 
-        out = blk.proj(x)
+        ctx = blk.proj(x)
+        out = ctx
         if blk.shared is not None:
-            out = out + blk.shared(x)
+            out = out + (blk.shared(x, None) if getattr(blk, "arch", "static") == "hetero"
+                         else blk.shared(x))
         for i, expert in enumerate(blk.experts):
             m = active[:, i] > 0
             if m.any():
-                c = expert(x[m]) * weight[m, i].view(-1, 1, 1, 1)
-                out = out.index_add(0, m.nonzero(as_tuple=True)[0], c.to(out.dtype))
+                ei = (expert(x[m], ctx[m]) if getattr(blk, "arch", "static") == "hetero"
+                      else expert(x[m]))
+                out = out.index_add(0, m.nonzero(as_tuple=True)[0],
+                                    (ei * weight[m, i].view(-1, 1, 1, 1)).to(out.dtype))
+        blk.last_out = out
         return out
     return fwd
 

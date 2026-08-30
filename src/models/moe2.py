@@ -95,6 +95,10 @@ class CondMoEBlock(nn.Module):
         threshold: float = 0.5,
         top1: bool = False,
         bottleneck: float = 0.5,
+        arch: str = "static",
+        hard_mask: bool = False,
+        rich_proj: bool = False,
+        init_gain: float = 0.0,
     ):
         super().__init__()
         c2 = c1 if c2 is None else c2
@@ -105,17 +109,41 @@ class CondMoEBlock(nn.Module):
         self.threshold = float(threshold)
         self.top1 = bool(top1)
 
-        self.experts = nn.ModuleList(
-            StaticExpert(c1, c2, kind=k, bottleneck=bottleneck) for k in self.expert_kinds
-        )
-        for e in self.experts:
-            e.zero_init_output()
+        # arch="static" is design 2: one architecture behind different fixed
+        # priors. `expert_intervention.py` measured that design as inert --
+        # switching every expert off moved mAP by 0.001. arch="hetero" is
+        # design 3: genuinely different architectures per degradation.
+        self.arch = arch
+        self.hard_mask = bool(hard_mask)
+        c_mid = max(8, int(c2 * bottleneck))
+        if arch == "hetero":
+            from .experts3 import EXPERT_ARCH, RichProj
 
-        # Always-on path. Not zero-initialised: it is meant to carry the model
-        # from step 0, so the routed branches learn corrections to something
-        # that already works.
-        self.shared = StaticExpert(c1, c2, kind="plain", bottleneck=bottleneck) if shared else None
-        self.proj = nn.Identity() if c1 == c2 else nn.Conv2d(c1, c2, 1, bias=False)
+            self.experts = nn.ModuleList(
+                EXPERT_ARCH[k](c1, c2, c_mid, use_ctx=rich_proj) for k in self.expert_kinds)
+            self.shared = EXPERT_ARCH["plain"](c1, c2, c_mid, use_ctx=False) if shared else None
+            self.proj = RichProj(c1, c2) if rich_proj else (
+                nn.Identity() if c1 == c2 else nn.Conv2d(c1, c2, 1, bias=False))
+        else:
+            self.experts = nn.ModuleList(
+                StaticExpert(c1, c2, kind=k, bottleneck=bottleneck) for k in self.expert_kinds)
+            self.shared = StaticExpert(c1, c2, kind="plain",
+                                       bottleneck=bottleneck) if shared else None
+            self.proj = nn.Identity() if c1 == c2 else nn.Conv2d(c1, c2, 1, bias=False)
+
+        # init_gain 0 reproduces design 2 exactly (branch starts at zero). A
+        # small non-zero gain leaves the block near-identity at step 0 while
+        # giving each branch a real gradient from the first step -- a branch
+        # pinned at zero climbs out slowly while a working bypass is already
+        # minimising the loss, which is half of why design 2's experts died.
+        for e in self.experts:
+            if init_gain > 0 and hasattr(e, "scale_init"):
+                e.scale_init(init_gain)
+            else:
+                e.zero_init_output()
+
+        # Whether the always-on path is fed INTO the experts as context.
+        self.rich_proj = bool(rich_proj)
 
         self.gate = nn.Linear(c1, self.n_experts)
 
@@ -124,6 +152,8 @@ class CondMoEBlock(nn.Module):
         self.last_gate: torch.Tensor | None = None     # clean sigmoid
         self.last_active: torch.Tensor | None = None   # clean activation mask
         self.last_index: torch.Tensor | None = None    # clean argmax, for reporting
+        self.last_out: torch.Tensor | None = None      # block output, for restoration
+        self.last_expert_out: dict[str, torch.Tensor] = {}  # per-branch, for inspection
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         logits = self.gate(x.mean((2, 3)))
@@ -147,18 +177,29 @@ class CondMoEBlock(nn.Module):
         # noisy mask is exactly what hid the previous collapse.
         self.last_active = (probs > self.threshold).float()
 
-        out = self.proj(x)
+        ctx = self.proj(x)
+        out = ctx
         if self.shared is not None:
-            out = out + self.shared(x)
+            sh = self.shared(x) if self.arch != "hetero" else self.shared(x, None)
+            out = out + sh
+            self.last_expert_out["shared"] = sh
+
+        # Straight-through: the branch runs at full strength when selected, but
+        # the gate still receives gradient through p. Design 2 multiplied the
+        # output by p, which tied MAGNITUDE to SELECTION -- a branch could only
+        # reach full strength if the gate was fully confident, and BCE caps that.
+        weight = probs + (active - probs).detach() if self.hard_mask else probs
 
         for i, expert in enumerate(self.experts):
             mask = active[:, i] > 0
             if mask.any():
-                # Weighted by the clean probability so gradient reaches the gate.
-                contribution = expert(x[mask]) * probs[mask, i].view(-1, 1, 1, 1)
+                xi = x[mask]
+                ei = expert(xi, ctx[mask]) if self.arch == "hetero" else expert(xi)
+                contribution = ei * weight[mask, i].view(-1, 1, 1, 1)
                 out = out.index_add(
                     0, mask.nonzero(as_tuple=True)[0], contribution.to(out.dtype)
                 )
+        self.last_out = out
         return out
 
 
