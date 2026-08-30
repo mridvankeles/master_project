@@ -231,6 +231,8 @@ def main() -> int:
                     gate_lambda=cfg.gate.get("lambda", 1.0),
                     gate_pos_weight=cfg.gate.get("pos_weight", 1.0),
                     gate_count_lambda=cfg.gate.get("count_lambda", 0.0),
+                    gate_floor_lambda=cfg.gate.get("floor_lambda", 0.0),
+                    gate_floor_tau=cfg.gate.get("floor_tau", 0.6),
                 )
                 mlflow.log_params({f"gate_{k}": v for k, v in cfg.gate.items()})
                 log.info("gate config: %s", cfg.gate)
@@ -239,6 +241,8 @@ def main() -> int:
                     nwd=cfg.loss.get("nwd", "off"),
                     nwd_c=cfg.loss.get("nwd_c", 12.8),
                     nwd_tiny_area=cfg.loss.get("tiny_area", 32.0**2),
+                    nwd_levels=cfg.loss.get("levels", "all"),
+                    nwd_p3_weight=cfg.loss.get("p3_weight", 1.0),
                 )
                 mlflow.log_params({f"loss_{k}": v for k, v in cfg.loss.items()})
                 log.info("loss config: %s", cfg.loss)

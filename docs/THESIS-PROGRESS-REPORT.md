@@ -237,8 +237,24 @@ Routing improved too — NMI **0.473 → 0.542**, gate activation roughly double
 **But the MoE still does not exploit it** (−0.0033 on fog2, −0.0044 on union3b).
 That is now a far more informative negative than before: interference exists,
 the router routes, the experts differ — and the block still does not convert
-that into accuracy. The prime suspect is gate calibration: only 0.466 experts
-activate per image, so most images pass through the shared branch alone.
+that into accuracy.
+
+**The suspect named here was wrong, and the correction matters.** This paragraph
+originally blamed gate calibration — "only 0.466 experts activate per image, so
+most images pass through the shared branch alone". Two later measurements killed
+it. `sum(p)` was already 1.012, so the probability mass was never missing. And
+the gate's apparent under-confidence was caused by mosaic augmentation, which
+composes four random images per canvas but labels it with only the first: 96% of
+training canvases mixed conditions, and the gate's max probability (0.500)
+tracked the fraction of canvas that matched its label (0.506) almost exactly.
+The gate was correctly fitted to a half-noise target.
+
+With mosaic off (`cond3d_nomosaic`) routing is nearly perfect — NMI **0.8748**,
+per-condition purity 0.95–0.99, one expert firing on every image — and the MoE
+is still behind its dense control. The real cause is now measured and is
+elsewhere: **inter-expert CKA 0.956–0.975.** The router routes correctly into
+experts that compute nearly the same function. See
+`pipeline-and-data-audit.md` and `results-cond3e-experiment.md`.
 
 ## Step 9 — Real low-light data ✅
 

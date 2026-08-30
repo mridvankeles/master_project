@@ -35,7 +35,8 @@ import torch.nn as nn
 
 from .experts import StaticExpert
 
-__all__ = ["CondMoEBlock", "gate_supervision_loss", "routing_cost", "condition_from_paths"]
+__all__ = ["CondMoEBlock", "gate_supervision_loss", "routing_cost",
+           "expert_floor_loss", "condition_from_paths"]
 
 # Order is load-bearing: it fixes which output unit means which condition, and
 # the supervision target is built from it.
@@ -259,6 +260,50 @@ def routing_cost(
     return weight_count * total / max(len(gates), 1)
 
 
+def expert_floor_loss(model: nn.Module, tau: float = 0.6) -> torch.Tensor | float:
+    """Charge the model for routing an image through the shared branch ALONE.
+
+    THE ARGUMENT
+    ------------
+    The shared branch exists so that a router mistake degrades the prediction
+    instead of destroying it. It is a safety net, not a route. But nothing in
+    the objective ever said so: an image whose gate probabilities all sit below
+    the threshold takes the shortcut, pays nothing for it, and the specialists
+    it was supposed to reach never see the sample or its gradient. Measured on
+    `cond3b_gated`, the gate's mean maximum probability was 0.500 -- sitting
+    exactly on the threshold, so roughly half of all images took the shortcut.
+
+    THE TERM
+    --------
+        L_floor = mean_b  relu( tau - max_i p_i(b) )
+
+    A hinge, not a penalty: once some expert reaches `tau` the cost is zero and
+    the term stops pulling, so it sets a floor on routing without competing with
+    the supervised BCE about *which* expert should win. `tau` should sit above
+    the block's firing threshold (0.6 against a 0.5 threshold) so a satisfied
+    hinge means the expert genuinely fires rather than hovering at the cut.
+
+    Deliberately NOT masked to labelled samples. `routing_cost` needs `n_true`
+    and so only applies where a condition label exists; this one applies to
+    every image, which is the case that matters for out-of-distribution input --
+    an unlabelled, unfamiliar sample must still be routed somewhere rather than
+    silently falling through to the shortcut.
+
+    Relation to the literature: this is the per-sample commitment / utilisation
+    floor used in sparse MoE, in its supervised-free form. Batch-level load
+    balancing (Switch, CV) cannot express it -- a batch can be perfectly
+    balanced while every individual image routes nowhere.
+    """
+    blocks = cond_moe_blocks(model)
+    gates = [b.last_gate for b in blocks if b.last_gate is not None]
+    if not gates or tau <= 0:
+        return 0.0
+    total = 0.0
+    for g in gates:
+        total = total + torch.relu(tau - g.max(1).values).mean()
+    return total / max(len(gates), 1)
+
+
 def routing_report(model: nn.Module) -> dict[str, float]:
     """Clean per-expert activation rates plus mean gate confidence."""
     out: dict[str, float] = {}
@@ -269,6 +314,9 @@ def routing_report(model: nn.Module) -> dict[str, float]:
         for e, kind in enumerate(block.expert_kinds):
             out[f"moe{b_i}/{kind}_active"] = float(act[:, e].mean())
         out[f"moe{b_i}/experts_per_image"] = float(act.sum(1).mean())
+        # The number the expert floor exists to drive to zero: images that
+        # reached no specialist and were carried by the shared branch alone.
+        out[f"moe{b_i}/shortcut_only"] = float((act.sum(1) == 0).float().mean())
         if block.last_gate is not None:
             # Expected count is threshold-free: it shows whether the gate is
             # confident, independently of where the cut is placed.

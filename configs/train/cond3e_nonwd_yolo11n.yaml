@@ -1,0 +1,91 @@
+# EXPERIMENTAL confirmation run — three changes at once, on a short schedule.
+#
+# This is not a results arm. It exists to answer three yes/no questions before a
+# 100-epoch run is spent on them:
+#   1. does removing HSV entirely (not just reducing it) let the gate separate
+#      the conditions on the cues that define them?
+#   2. does the expert floor drive `shortcut_only` to ~0 without wrecking mAP?
+#   3. does NWD restricted to the P3 branch, with its units finally correct,
+#      move the small-object miss rate rather than the aggregate?
+#
+# Judged against `cond3d_nomosaic_yolo11n` at the SAME epoch, not against a
+# finished run. Short schedule, so nothing here is quotable as a final number.
+
+run_name: cond3e_nonwd_yolo11n
+experiment: dior-hbb-full
+condition: union3b
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb_cond3.yaml
+scale: n
+
+train:
+  # 40, not 100. This is a confirmation, and it has to finish inside the budget.
+  epochs: 40
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 40
+  cos_lr: true
+
+  # --- AUGMENTATION -----------------------------------------------------
+  # Photometric augmentation OFF, geometric augmentation KEPT.
+  #
+  # Measured (docs/pipeline-and-data-audit.md): with hsv_v=0.4 / hsv_s=0.7 the
+  # clear and fog2 brightness ranges overlap (104-158) and the clear and night
+  # saturation ranges overlap almost completely. Saturation and brightness ARE
+  # the condition labels; randomising them asks the gate to classify a signal
+  # that has been deleted. cond3d only reduced them, which narrows the overlap
+  # rather than removing it.
+  hsv_h: 0.0
+  hsv_s: 0.0
+  hsv_v: 0.0
+  # Mosaic composes 4 images and reports only the first one's filename
+  # (augment.py:759), which is where the gate label comes from: 96% of canvases
+  # mix conditions, and the label describes 50% of the picture.
+  mosaic: 0.0
+  # Geometry does not touch the condition signal, and it is the augmentation
+  # that actually helps a small-object detector generalise. Kept at defaults.
+  scale: 0.5
+  translate: 0.1
+  fliplr: 0.5
+  degrees: 0.0
+
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000
+
+gate:
+  # Which expert should fire — unchanged from cond3b/cond3d so the comparison
+  # holds.
+  lambda: 1.0
+  # THAT an expert fires. Hinge: mean relu(tau - max_i p_i), zero cost once some
+  # expert clears tau, so it sets a floor without arguing with the BCE about
+  # which branch wins. tau 0.6 sits above the block's 0.5 firing threshold, so a
+  # satisfied hinge means the expert genuinely runs.
+  #
+  # Unlike count_lambda this needs no label, so it also governs unlabelled and
+  # out-of-distribution input — which is the case the shared branch is for.
+  floor_lambda: 0.5
+  floor_tau: 0.6
+  # OFF. The count cost was a treatment for a symptom of the mosaic label bug
+  # (sum(p) was already 1.012); the floor is the term that expresses "use an
+  # expert", and running both would confound them.
+  count_lambda: 0.0
+  pos_weight: 1.0
+
+# NO `loss:` block — this is the ablation that isolates the P3-NWD change.
+# Identical to cond3e_p3nwd in data, schedule, seed, augmentation, gate and
+# floor; the only difference is that box regression is stock CIoU at every
+# level. Without it, cond3e_p3nwd vs cond3d would confound the loss change with
+# the augmentation change, and the units bug found today makes that the one
+# comparison worth protecting.

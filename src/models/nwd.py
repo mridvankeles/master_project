@@ -57,7 +57,8 @@ def nwd_similarity(pred_xyxy: torch.Tensor, target_xyxy: torch.Tensor, c: float 
     """NWD in [0, 1]; 1 is a perfect match.
 
     Args:
-        pred_xyxy, target_xyxy: (N, 4) boxes in xyxy, in pixels at model scale.
+        pred_xyxy, target_xyxy: (N, 4) boxes in xyxy, IN PIXELS at model scale.
+           The caller is responsible for converting out of stride units.
         c: normalising constant. Should sit near the dataset's typical object
            size — the loss is insensitive to it within a factor of ~2, but a
            badly wrong C flattens the gradient. 12.8 is the value used for
@@ -99,16 +100,46 @@ class NWDBboxLoss(BboxLoss):
 
     The DFL term is inherited unchanged: it regresses a distance distribution and
     is not the part that misbehaves on small objects.
+
+    UNITS -- the bug this class shipped with
+    ----------------------------------------
+    Ultralytics passes `pred_bboxes` and `target_bboxes / stride_tensor` into
+    `bbox_loss`, so boxes arrive in FEATURE-MAP CELLS, not pixels. CIoU does not
+    care -- IoU is scale invariant -- but NWD's constant `c` and the size gate's
+    `tiny_area` are absolute, so both were being fed numbers 8-32x too small.
+    Measured consequence: `size_gate` returned ~1.0 for every box in DIOR, from a
+    16 px vehicle to a 320 px stadium, and `mode="gated"` silently behaved as
+    `mode="always"` -- NWD applied to everything, which is precisely the regime
+    the paper says hurts large objects. That is a better explanation of the
+    original NWD arm (+0.008 aggregate, **-0.006 on the small classes it
+    targeted**) than anything about the loss itself.
+
+    Boxes are now multiplied back by their anchor's stride before NWD and the
+    size gate see them.
+
+    LEVELS
+    ------
+    `levels="p3"` restricts the NWD blend to anchors on the finest pyramid level
+    (stride 8) -- the branch the MoE block feeds and the only one that carries
+    tiny objects. P4/P5 keep plain CIoU, where it works. `p3_weight` scales that
+    level's regression loss so gradient is spent where the misses are: measured
+    on `cond3b_gated`, 100% of objects under 8 px and 63.7% under 16 px are
+    missed, against ~10% above 32 px.
     """
 
     def __init__(self, reg_max: int = 16, c: float = 12.8,
-                 tiny_area: float = 32.0**2, mode: str = "gated"):
+                 tiny_area: float = 32.0**2, mode: str = "gated",
+                 levels: str = "all", p3_weight: float = 1.0):
         super().__init__(reg_max)
         self.c = float(c)
         self.tiny_area = float(tiny_area)
         # "gated" blends by size; "always" applies NWD to every box (the
         # ablation that shows why gating is needed); "off" is stock CIoU.
         self.mode = mode
+        # "all" | "p3": which pyramid levels the NWD blend applies to.
+        self.levels = levels
+        # Multiplier on the P3 regression loss (IoU term and DFL alike).
+        self.p3_weight = float(p3_weight)
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes,
                 target_scores, target_scores_sum, fg_mask, imgsz, stride):
@@ -116,25 +147,41 @@ class NWDBboxLoss(BboxLoss):
         pred_fg = pred_bboxes[fg_mask]
         tgt_fg = target_bboxes[fg_mask]
 
+        # Per-foreground-anchor stride, so cells can be converted to pixels and
+        # the finest level can be identified. `stride` is (A, 1) over anchors and
+        # `fg_mask` is (B, A), so it has to be broadcast over the batch first.
+        s = stride.view(1, -1).expand(fg_mask.shape)[fg_mask].unsqueeze(-1)
+        on_p3 = s <= stride.min()
+
         iou = bbox_iou(pred_fg, tgt_fg, xywh=False, CIoU=True)
         ciou_term = 1.0 - iou
 
         if self.mode == "off":
-            loss_iou = (ciou_term * weight).sum() / target_scores_sum
+            blended = ciou_term
         else:
-            nwd_term = (1.0 - nwd_similarity(pred_fg, tgt_fg, self.c)).unsqueeze(-1)
+            nwd_term = (1.0 - nwd_similarity(pred_fg * s, tgt_fg * s, self.c)).unsqueeze(-1)
             if self.mode == "always":
                 blended = nwd_term
             else:
-                a = size_gate(tgt_fg, self.tiny_area).unsqueeze(-1)
+                a = size_gate(tgt_fg * s, self.tiny_area).unsqueeze(-1)
                 blended = (1.0 - a) * ciou_term + a * nwd_term
-            loss_iou = (blended * weight).sum() / target_scores_sum
+            if self.levels == "p3":
+                blended = torch.where(on_p3, blended, ciou_term)
+
+        # Extra weight on the tiny-object branch. Deliberately NOT renormalised:
+        # the point is to spend more gradient there, so the box loss magnitude
+        # rises with p3_weight and the run is not comparable to one without it.
+        w = weight
+        if self.p3_weight != 1.0:
+            w = weight * (1.0 + (self.p3_weight - 1.0) * on_p3.to(weight.dtype))
+
+        loss_iou = (blended * w).sum() / target_scores_sum
 
         if self.dfl_loss:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = self.dfl_loss(
                 pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]
-            ) * weight
+            ) * w
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
             loss_dfl = torch.tensor(0.0, device=pred_dist.device)
@@ -143,7 +190,8 @@ class NWDBboxLoss(BboxLoss):
 
 
 def install_nwd(model: nn.Module, c: float = 12.8, tiny_area: float = 32.0**2,
-                mode: str = "gated") -> bool:
+                mode: str = "gated", levels: str = "all",
+                p3_weight: float = 1.0) -> bool:
     """Swap the criterion's box loss in place. Returns True if it was applied.
 
     Called after the criterion exists, because Ultralytics builds it lazily on
@@ -154,7 +202,8 @@ def install_nwd(model: nn.Module, c: float = 12.8, tiny_area: float = 32.0**2,
         return False
     old = criterion.bbox_loss
     reg_max = getattr(getattr(old, "dfl_loss", None), "reg_max", 16)
-    new = NWDBboxLoss(reg_max=reg_max, c=c, tiny_area=tiny_area, mode=mode)
+    new = NWDBboxLoss(reg_max=reg_max, c=c, tiny_area=tiny_area, mode=mode,
+                      levels=levels, p3_weight=p3_weight)
     new.to(next(model.parameters()).device)
     criterion.bbox_loss = new
     return True

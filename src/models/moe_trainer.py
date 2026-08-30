@@ -60,9 +60,16 @@ class MoEDetectionTrainer(DetectionTrainer):
         self.gate_pos_weight = float(overrides.pop("gate_pos_weight", 1.0))
         self.gate_count_lambda = float(overrides.pop("gate_count_lambda", 0.0))
         self._last_count_loss = 0.0
+        # Expert floor: charge every image that reaches no specialist at all.
+        # Unlike count_lambda this needs no label, so it also governs OOD input.
+        self.gate_floor_lambda = float(overrides.pop("gate_floor_lambda", 0.0))
+        self.gate_floor_tau = float(overrides.pop("gate_floor_tau", 0.6))
+        self._last_floor_loss = 0.0
         self.nwd_mode = str(overrides.pop("nwd", "off"))
         self.nwd_c = float(overrides.pop("nwd_c", 12.8))
         self.nwd_tiny_area = float(overrides.pop("nwd_tiny_area", 32.0**2))
+        self.nwd_levels = str(overrides.pop("nwd_levels", "all"))
+        self.nwd_p3_weight = float(overrides.pop("nwd_p3_weight", 1.0))
         self._nwd_installed = False
         self._epoch_shares: dict[str, float] = defaultdict(float)
         self._epoch_batches = 0
@@ -81,10 +88,13 @@ class MoEDetectionTrainer(DetectionTrainer):
         LOGGER.info(
             f"MoE trainer: {len(blocks)} legacy block(s), {len(cond_blocks)} cond block(s), "
             f"lambda={self.moe_lambda}, aux={self.moe_aux}, "
-            f"gate_lambda={self.gate_lambda}, nwd={self.nwd_mode}"
+            f"gate_lambda={self.gate_lambda}, floor={self.gate_floor_lambda}"
+            f"@tau={self.gate_floor_tau}, nwd={self.nwd_mode}/{self.nwd_levels}"
+            f" p3w={self.nwd_p3_weight}"
         )
         use_aux = self.moe_lambda != 0 and bool(blocks)
-        if not use_aux and self.nwd_mode == "off" and not (self.gate_lambda and cond_blocks):
+        gate_active = (self.gate_lambda or self.gate_floor_lambda) and cond_blocks
+        if not use_aux and self.nwd_mode == "off" and not gate_active:
             LOGGER.warning("MoE trainer: neither auxiliary loss nor NWD is active")
             return model
 
@@ -99,7 +109,8 @@ class MoEDetectionTrainer(DetectionTrainer):
 
                 total_first, items_first = inner_loss(batch, preds)
                 ok = install_nwd(model, c=self.nwd_c,
-                                 tiny_area=self.nwd_tiny_area, mode=self.nwd_mode)
+                                 tiny_area=self.nwd_tiny_area, mode=self.nwd_mode,
+                                 levels=self.nwd_levels, p3_weight=self.nwd_p3_weight)
                 self._nwd_installed = True
                 LOGGER.info(f"NWD box loss installed: {ok} (mode={self.nwd_mode})")
                 if not ok:
@@ -123,9 +134,10 @@ class MoEDetectionTrainer(DetectionTrainer):
         labels would then compare unrelated rows (and crash on a size mismatch,
         which is how this was found).
         """
-        if self.gate_lambda == 0 or not model.training:
+        if not model.training or (self.gate_lambda == 0 and self.gate_floor_lambda == 0):
             return total
-        from .moe2 import cond_moe_blocks, condition_from_paths, gate_supervision_loss
+        from .moe2 import (cond_moe_blocks, condition_from_paths, expert_floor_loss,
+                           gate_supervision_loss)
 
         blocks = cond_moe_blocks(model)
         if not blocks:
@@ -140,17 +152,28 @@ class MoEDetectionTrainer(DetectionTrainer):
                  and b.last_logits.shape[0] != targets.shape[0]]
         if stale:
             return total
-        loss = gate_supervision_loss(model, targets, pos_weight=self.gate_pos_weight)
-        if self.gate_count_lambda:
-            from .moe2 import routing_cost
+        # Each term is scaled by its OWN lambda and summed, rather than folded
+        # into one number and multiplied by gate_lambda. The earlier shape made
+        # a floor-only run (gate_lambda = 0) silently contribute nothing.
+        term = 0.0
+        if self.gate_lambda:
+            bce = gate_supervision_loss(model, targets, pos_weight=self.gate_pos_weight)
+            if self.gate_count_lambda:
+                from .moe2 import routing_cost
 
-            cost = routing_cost(model, targets, weight_count=self.gate_count_lambda)
-            if isinstance(cost, torch.Tensor):
-                self._last_count_loss = float(cost.detach())
-                loss = loss + cost
-        if isinstance(loss, torch.Tensor):
-            self._last_gate_loss = float(loss.detach())
-            term = self.gate_lambda * loss
+                cost = routing_cost(model, targets, weight_count=self.gate_count_lambda)
+                if isinstance(cost, torch.Tensor):
+                    self._last_count_loss = float(cost.detach())
+                    bce = bce + cost
+            if isinstance(bce, torch.Tensor):
+                self._last_gate_loss = float(bce.detach())
+                term = term + self.gate_lambda * bce
+        if self.gate_floor_lambda:
+            floor = expert_floor_loss(model, tau=self.gate_floor_tau)
+            if isinstance(floor, torch.Tensor):
+                self._last_floor_loss = float(floor.detach())
+                term = term + self.gate_floor_lambda * floor
+        if isinstance(term, torch.Tensor):
             if isinstance(total, torch.Tensor) and total.ndim > 0:
                 total = total.clone()
                 total[0] = total[0] + term
@@ -230,6 +253,7 @@ class MoEDetectionTrainer(DetectionTrainer):
         out["moe/aux_loss"] = self._last_aux
         out["moe/gate_loss"] = getattr(self, "_last_gate_loss", 0.0)
         out["moe/count_loss"] = getattr(self, "_last_count_loss", 0.0)
+        out["moe/floor_loss"] = getattr(self, "_last_floor_loss", 0.0)
         out.update(self._cond_report)
         # min share across experts: one number that says "is anything dying?"
         shares = [v for k, v in out.items() if k.endswith("_share")]
