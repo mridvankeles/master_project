@@ -1,0 +1,37 @@
+# Dense control, CALIBRATED fog. Identical to union3_full_yolo11n except
+# that fog comes from fog2 (dark-channel +110, matching real haze) instead of the
+# Hazy-DIOR release (+37/+62/+93, weaker than real MODERATE fog).
+#
+# Matched to its control in every training hyperparameter: same data, epochs,
+# batch, schedule, seed and pretrained weights. Only the lines noted below differ.
+
+run_name: union3d_nomosaic_yolo11n
+experiment: dior-hbb-full
+condition: union3b
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  mosaic: 0.0
+  hsv_v: 0.15
+  hsv_s: 0.3
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000

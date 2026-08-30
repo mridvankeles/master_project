@@ -1,0 +1,49 @@
+# Static experts (clear/fog/night) + always-on shared branch + SUPERVISED multi-label gate.
+#
+# Acceptance criteria BEFORE accuracy is looked at (analyse_routing.py):
+#   NMI(route ; condition) > 0, inter-expert CKA < 1, route not concentrated.
+# Matched to its control in every training hyperparameter: same data, epochs,
+# batch, schedule, seed and pretrained weights. Only the lines noted below differ.
+
+run_name: cond3d_nomosaic_yolo11n
+experiment: dior-hbb-full
+condition: union3b
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb_cond3.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 30
+  cos_lr: true
+  # MOSAIC OFF. Mosaic composes each training image from 4 randomly drawn
+  # images but records only the FIRST in `im_file` (augment.py:759). Measured:
+  # 97.3% of mosaics mix conditions, and on average only 50.6% of the canvas
+  # matches the label the gate is supervised with. The gate was being told
+  # "this is fog" about a canvas that is half something else -- so spreading its
+  # probability mass was the CORRECT response, not a calibration failure.
+  mosaic: 0.0
+  # HSV jitter randomises the very signals that define the conditions:
+  # hsv_v moves brightness (night IS brightness) and hsv_s moves saturation
+  # (haze desaturates). Reduced, not zeroed, so some photometric robustness
+  # remains for the detector.
+  hsv_v: 0.15
+  hsv_s: 0.3
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000
+gate:
+  lambda: 1.0
