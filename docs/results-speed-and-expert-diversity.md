@@ -99,17 +99,51 @@ The docstring in `experts.py` claims "two experts cannot converge to the same
 function no matter how the gate behaves". The measurement says the fixed part
 imposes almost no distinguishing bias at all.
 
-### What a genuinely different operator looks like
+### What a genuinely different operator looks like — RETRACTED
 
-| candidate | vs clear | vs fog | vs night |
-|---|---:|---:|---:|
-| `x - mu` (subtractive) | 0.9411 | **0.9991** | 0.9814 |
-| `(x - mu)/sd` (contrast norm) | 0.9275 | 0.9720 | **0.9981** |
-| **`x / mu` (divisive)** | **0.3003** | **0.3087** | **0.3287** |
+**This section originally claimed that a divisive prior `x / mu` scores CKA 0.30
+against all three, and that "the redesign is three lines". That was wrong, and
+the error was mine: a numerical artifact, not a finding.**
 
-Everything that removes the local mean lands in the same subspace. The divisive
-family does not. That is a factor-of-three difference in the project's own
-diversity metric, available from a one-line change.
+70% of the local means of a post-SiLU feature map are negative and 2% are within
+1e-3 of zero, so `x / (mu + 1e-3)` divides by near-zero and produces values up
+to **2.4e7**. A handful of exploded locations then dominate the Gram matrix and
+drag CKA down. Written stably the operator is not different at all:
+
+| variant | CKA vs input | max abs output |
+|---|---:|---:|
+| `x / (mu + eps)` — what was published | **0.3192** | **24,235,042** |
+| `x / (abs(mu) + eps)` | 0.9539 | 3,762 |
+| `x / (abs(mu) + 0.1)` | 0.9796 | 61 |
+| `log(abs(x)) - log(abs(mu))` | 0.9753 | 8 |
+
+A CKA that falls only because a few locations explode is not diversity.
+
+### The corrected result, from an actual search
+
+`scripts/search_expert_priors.py` scores **36 candidate priors** — subtractive,
+divisive, contrast-normalising, log-domain, local-range, dark-channel, Sobel,
+phase-only and Fourier high-pass, across kernel widths 3–21 and dilations 1–2 —
+on the real P3 features, with no training. Objective: minimise the *worst*
+pairwise CKA in the triple, with `clear` pinned to identity.
+
+| | worst pair |
+|---|---:|
+| current design (identity / sub_mu k15 / log_sub k7) | 0.9883 |
+| **best of 36 candidates** (identity / range k15 / div_mu k7 d2) | **0.9504** |
+
+**The entire searchable space buys 0.04 of CKA.** And the binding constraint is
+always `identity vs X`: every candidate scores ≥0.95 against the raw input.
+
+That is a much stronger negative than the one it replaces, and it points
+somewhere else entirely. No local spatial filter of an already-normalised
+feature map can be very different from it — these are all near-linear maps of a
+common input, so they necessarily carry the same information. **The priors are
+not badly chosen; they are in the wrong place.** By P3 the backbone's
+BatchNorms have removed the first- and second-order statistics that *define*
+fog and night, and `x.amin(dim=1)` over 256 SiLU channels is not a dark channel.
+Light- and haze-invariance are properties of RGB, and that is where they have
+to be computed.
 
 ### A caveat on the metric itself
 
@@ -124,6 +158,80 @@ misleading. Future routing reports should carry both.
 
 ---
 
+## 3. The decisive test: force each expert and see if anything changes
+
+Every diversity metric argued about above is a **correlation**. The question
+that matters is a **causal** one: if you send every image through the wrong
+expert, does the detector get worse? `scripts/expert_intervention.py` replaces
+the routing policy with a fixed one and re-runs validation.
+
+**mAP50, `cond3d_nomosaic`, per condition:**
+
+| data | gate | **none** | all | force:clear | force:fog | force:night | **spread** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| clear | 0.7512 | **0.7510** | 0.7499 | 0.7515 | 0.7511 | 0.7506 | **0.0016** |
+| fog2 | 0.7457 | **0.7456** | 0.7445 | 0.7449 | 0.7451 | 0.7450 | **0.0011** |
+| night | 0.7281 | **0.7283** | 0.7267 | 0.7270 | 0.7266 | 0.7279 | **0.0017** |
+
+**mAP50-95** behaves identically: spread 0.0020–0.0024.
+
+Read the `none` column. That is **every expert switched off** — the shared
+always-on branch alone — and it scores 0.7456 on fog against the trained gate's
+0.7457, and 0.7283 on night against 0.7281. Switching off the entire mixture
+costs nothing. Forcing the *wrong* expert costs nothing. Forcing *all three*
+costs nothing.
+
+**The experts are functionally inert.** The block is a dense model with an
+expensive unused branch. That single fact explains everything the project has
+been unable to explain:
+
+- why four interventions improved routing and none improved accuracy — nothing
+  downstream depended on the route;
+- why the MoE tracks its dense control to within 0.005 — it *is* the dense
+  control;
+- why `cond3b` (57% shortcut-only) scored the same as `cond3d` (2%) — the
+  shortcut is as good as the experts;
+- why the CKA argument was unresolvable — it was measuring the geometry of a
+  signal that never reaches the loss.
+
+### Why they are inert
+
+| | proj | shared | clear | fog | night |
+|---|---:|---:|---:|---:|---:|
+| `cond3d` output RMS | 0.361 | 0.322 | 0.101 | 0.108 | 0.088 |
+| as % of (proj+shared) | — | — | **19.9%** | **21.1%** | **17.2%** |
+| `cond3b` as % | — | — | 10.8% | 10.0% | 9.9% |
+| `cond3e_nonwd` as % | — | — | 12.3% | 12.4% | 18.5% |
+
+An expert contributes 10–21% of the always-on path's magnitude — and is then
+multiplied by its gate probability (~0.65–0.77), so ~7–16% reaches the sum. A
+perturbation that size on one neck feature map, with a full detection head
+downstream, moves mAP by less than 0.002.
+
+Two design decisions produce this, and both were deliberate:
+
+1. **`zero_init_output()` starts every expert at exactly zero** while the shared
+   branch starts working immediately. The shared branch therefore takes the job
+   on step 1, the detection loss is satisfied, and no gradient pressure ever
+   builds to make the experts grow. This is the classic residual-MoE failure:
+   an always-competent bypass makes the specialists optional, and optional
+   branches stay small.
+2. **The expert output is scaled by the gate probability** `p_i`, so selection
+   and magnitude are the same number. A branch can only reach full strength if
+   the gate is fully confident, and confidence is capped by the BCE.
+
+### What this makes testable
+
+- **Decouple selection from magnitude.** Straight-through hard mask: the expert
+  runs at weight 1.0 when selected, with the gradient still flowing to the gate
+  through `p`. Removes cause (2) with no architecture change.
+- **Weaken or remove the shared branch.** If it is always competent the experts
+  are never needed. Halving its width, or zero-initialising *it* instead, forces
+  the routed branches to carry real function. Removes cause (1).
+- **Then, and only then**, prior design and kernel width become worth searching.
+  Tuning the shape of a branch that contributes 7% of one feature map is
+  measuring noise.
+
 ## 3. What this implies
 
 - **The efficiency claim needs rewriting.** Conditional routing here reduces
@@ -132,8 +240,10 @@ misleading. Future routing reports should carry both.
   large enough for the saved convolution to dominate the gather/scatter, or if
   the whole batch routes the same way (condition-sorted batching), or with a
   fused kernel.
-- **The prior redesign is the highest-leverage change available**, and it is
-  cheap: three lines in `src/models/experts.py`.
+- **The prior redesign is NOT the highest-leverage change.** A 36-candidate
+  search buys 0.04 of CKA, and the intervention above shows the branches those
+  priors feed contribute nothing measurable anyway. Expert *contribution* has to
+  be fixed before expert *design* means anything.
 - **The experts should get smaller, not larger.** At 15–41% of the model each,
   they are not corrections; and a smaller expert makes the sparsity arithmetic
   worse, not better, which is another reason the efficiency story has to be

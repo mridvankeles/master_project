@@ -132,8 +132,20 @@ measured, not guessed: the experts never diverged. Prior-to-prior CKA, with no
 learned weights involved, is already **0.946 / 0.932 / 0.983** -- the learned
 values (0.828 / 0.821 / 0.977) are inherited from it, ordering included. Both
 "different physics" priors are subtractive high-passes differing only in kernel
-width, which is the same non-difference the FIRST MoE had. A divisive prior
-(`x / mu`) scores 0.30 instead of 0.98. See
+width, which is the same non-difference the FIRST MoE had.
+
+But a search over **36 candidate priors** (subtractive, divisive, contrast,
+log, range, dark-channel, Sobel, phase, Fourier; kernels 3-21) buys almost
+nothing: best achievable worst-pair CKA **0.9504** against the current 0.9883,
+and every candidate scores >=0.95 against the raw input. An earlier claim here
+that a divisive prior scores 0.30 was **wrong** -- a numerical artifact from
+dividing by near-zero local means (outputs up to 2.4e7). Written stably it
+scores 0.954.
+
+The conclusion is stronger than the one it replaces: no local filter of an
+already-normalised P3 feature map can differ much from it. The priors are not
+badly chosen, they are in the wrong PLACE -- the statistics that define fog and
+night are removed by the backbone's BatchNorms long before P3. See
 `results-speed-and-expert-diversity.md`.
 
 **Cost, measured without TTA:** the MoE runs 6.10 activated GFLOPs against the
