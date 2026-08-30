@@ -13,7 +13,10 @@
 #   1. intervention spread -- do the experts do anything at all?
 #   2. restore_loss curve  -- did the fog branch learn to reproduce clear features?
 #   3. routing (NMI, purity) -- unchanged from cond3d, hopefully
-#   4. mAP -- last, and inside the seed-noise floor we have still not measured
+#   4. mAP -- last, and inside a seed-noise floor we have still not measured
+#
+# Control: `union3h_dense_yolo11n.yaml`, same data, schedule, seed and
+# augmentation, stock YOLO11n.
 
 run_name: cond3h_hetero_yolo11n
 experiment: dior-hbb-full
@@ -25,28 +28,28 @@ model: configs/model/yolo11_dior_hbb_cond3h.yaml
 scale: n
 
 train:
-  epochs: 60
+  epochs: 100
   imgsz: 640
   batch: 16
   device: 0
   workers: 8
   optimizer: auto
-  patience: 60
+  patience: 100
   cos_lr: true
 
   # --- AUGMENTATION -----------------------------------------------------
   # Photometric augmentation kept, but bounded. From the measured HSV channel
   # means (docs/pipeline-and-data-audit.md), RandomHSV multiplies by U(1-g,1+g),
-  # so the conditions stay separated while
+  # so the three conditions stay separated while
   #     hsv_v < 0.210   (binding pair clear <-> fog2 on brightness)
   #     hsv_s < 0.154   (binding pair clear <-> night on saturation)
   # cond3e zeroed both, which threw away real regularisation for no reason.
   hsv_h: 0.015
   hsv_s: 0.12
   hsv_v: 0.15
-  # MOSAIC MUST STAY 0. Beyond the label-corruption reason, paired restoration
-  # depends on the clear twin receiving the same geometric augmentation, and a
-  # mosaic twin would draw three further random images.
+  # MOSAIC MUST STAY 0. Beyond the label corruption it causes, paired
+  # restoration needs the clear twin to receive the same geometric
+  # augmentation, and a mosaic twin would draw three further random images.
   mosaic: 0.0
   scale: 0.5
   translate: 0.1
@@ -64,8 +67,11 @@ subset:
 
 gate:
   lambda: 1.0
+  # Hinge floor: mean relu(tau - max_i p_i). Zero cost once some expert clears
+  # tau, so it never argues with the BCE about WHICH branch wins.
   floor_lambda: 0.5
   floor_tau: 0.6
+  # Off: the count cost treated a symptom of the mosaic label bug.
   count_lambda: 0.0
   pos_weight: 1.0
 
@@ -77,8 +83,8 @@ restore:
   #
   #   L = SmoothL1( block_out(degraded), block_out(clear_twin).detach() )
   #
-  # Applied only to fog/night samples. This is dehazing and light-invariance with
-  # ground truth, and it gives the experts an objective the always-on branch
-  # cannot absorb -- which is the mechanism that made design 2's experts inert.
+  # Applied only to fog/night samples. Dehazing and light-invariance with ground
+  # truth, and an objective the always-on branch cannot absorb -- which is the
+  # mechanism that made design 2's experts inert.
   lambda: 1.0
   beta: 0.1

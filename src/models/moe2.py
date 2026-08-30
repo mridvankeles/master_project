@@ -36,7 +36,8 @@ import torch.nn as nn
 from .experts import StaticExpert
 
 __all__ = ["CondMoEBlock", "gate_supervision_loss", "routing_cost",
-           "expert_floor_loss", "condition_from_paths"]
+           "expert_floor_loss", "expert_orthogonality_loss",
+           "condition_from_paths"]
 
 # Order is load-bearing: it fixes which output unit means which condition, and
 # the supervision target is built from it.
@@ -190,11 +191,15 @@ class CondMoEBlock(nn.Module):
         # reach full strength if the gate was fully confident, and BCE caps that.
         weight = probs + (active - probs).detach() if self.hard_mask else probs
 
+        self.last_expert_out = {}
         for i, expert in enumerate(self.experts):
             mask = active[:, i] > 0
             if mask.any():
                 xi = x[mask]
                 ei = expert(xi, ctx[mask]) if self.arch == "hetero" else expert(xi)
+                # Stashed for the orthogonality term and for inspection. Only the
+                # rows that actually ran, so pairs are compared on shared samples.
+                self.last_expert_out[self.expert_kinds[i]] = ei
                 contribution = ei * weight[mask, i].view(-1, 1, 1, 1)
                 out = out.index_add(
                     0, mask.nonzero(as_tuple=True)[0], contribution.to(out.dtype)
@@ -343,6 +348,48 @@ def expert_floor_loss(model: nn.Module, tau: float = 0.6) -> torch.Tensor | floa
     for g in gates:
         total = total + torch.relu(tau - g.max(1).values).mean()
     return total / max(len(gates), 1)
+
+
+def expert_orthogonality_loss(model: nn.Module) -> torch.Tensor | float:
+    """Penalise experts that produce similar outputs for the SAME input.
+
+    From *Advancing Expert Specialization for Better MoE* (NeurIPS 2025): an
+    orthogonality term on expert OUTPUTS, alongside the task loss, to stop
+    branches converging. Their variance loss is deliberately not implemented --
+    it targets indecisive routing, and ours is already at NMI 0.875.
+
+        L_o = mean over pairs (i<j), over samples b, of  cos(e_i(x_b), e_j(x_b))^2
+
+    Squared cosine, not cosine: anti-correlated experts are as specialised as
+    orthogonal ones, and penalising -1 as hard as +1 would ask for something the
+    task never needs.
+
+    ON OUTPUTS, NOT WEIGHTS, deliberately. A 2026 analysis of geometric
+    regularisation in MoE (arXiv 2601.00457) found weight-space orthogonality
+    penalties can *increase* activation overlap by up to 114%. What we measured
+    is an output-space problem, so it is penalised in output space.
+
+    A caution that belongs next to the term: this cannot fix an INERT expert.
+    `expert_intervention.py` measured that switching every expert off costs
+    0.001 mAP; making two irrelevant branches orthogonal leaves them irrelevant.
+    Use it alongside the restoration loss, never instead of it.
+    """
+    blocks = cond_moe_blocks(model)
+    total, n = 0.0, 0
+    for b in blocks:
+        outs = [b.last_expert_out.get(k) for k in b.expert_kinds]
+        outs = [o for o in outs if o is not None and o.shape[0] > 0]
+        if len(outs) < 2:
+            continue
+        flat = [o.flatten(1) for o in outs]
+        for i in range(len(flat)):
+            for j in range(i + 1, len(flat)):
+                if flat[i].shape != flat[j].shape:
+                    continue
+                c = nn.functional.cosine_similarity(flat[i], flat[j], dim=1)
+                total = total + (c ** 2).mean()
+                n += 1
+    return total / n if n else 0.0
 
 
 def routing_report(model: nn.Module) -> dict[str, float]:

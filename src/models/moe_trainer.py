@@ -64,6 +64,10 @@ class MoEDetectionTrainer(DetectionTrainer):
         # Unlike count_lambda this needs no label, so it also governs OOD input.
         self.gate_floor_lambda = float(overrides.pop("gate_floor_lambda", 0.0))
         self.gate_floor_tau = float(overrides.pop("gate_floor_tau", 0.6))
+        # Orthogonality on expert OUTPUTS (NeurIPS 2025). Cannot fix an inert
+        # expert -- pair it with restore_lambda, never use it alone.
+        self.gate_ortho_lambda = float(overrides.pop("gate_ortho_lambda", 0.0))
+        self._last_ortho = 0.0
         self._last_floor_loss = 0.0
         self.nwd_mode = str(overrides.pop("nwd", "off"))
         self.nwd_c = float(overrides.pop("nwd_c", 12.8))
@@ -100,7 +104,7 @@ class MoEDetectionTrainer(DetectionTrainer):
         )
         use_aux = self.moe_lambda != 0 and bool(blocks)
         gate_active = (self.gate_lambda or self.gate_floor_lambda
-                       or self.restore_lambda) and cond_blocks
+                       or self.gate_ortho_lambda or self.restore_lambda) and cond_blocks
         if not use_aux and self.nwd_mode == "off" and not gate_active:
             LOGGER.warning("MoE trainer: neither auxiliary loss nor NWD is active")
             return model
@@ -145,7 +149,8 @@ class MoEDetectionTrainer(DetectionTrainer):
         labels would then compare unrelated rows (and crash on a size mismatch,
         which is how this was found).
         """
-        if not model.training or (self.gate_lambda == 0 and self.gate_floor_lambda == 0):
+        if not model.training or (self.gate_lambda == 0 and self.gate_floor_lambda == 0
+                                  and self.gate_ortho_lambda == 0):
             return total
         from .moe2 import (cond_moe_blocks, condition_from_paths, expert_floor_loss,
                            gate_supervision_loss)
@@ -179,6 +184,13 @@ class MoEDetectionTrainer(DetectionTrainer):
             if isinstance(bce, torch.Tensor):
                 self._last_gate_loss = float(bce.detach())
                 term = term + self.gate_lambda * bce
+        if self.gate_ortho_lambda:
+            from .moe2 import expert_orthogonality_loss
+
+            o = expert_orthogonality_loss(model)
+            if isinstance(o, torch.Tensor):
+                self._last_ortho = float(o.detach())
+                term = term + self.gate_ortho_lambda * o
         if self.gate_floor_lambda:
             floor = expert_floor_loss(model, tau=self.gate_floor_tau)
             if isinstance(floor, torch.Tensor):
@@ -331,6 +343,7 @@ class MoEDetectionTrainer(DetectionTrainer):
         out["moe/count_loss"] = getattr(self, "_last_count_loss", 0.0)
         out["moe/floor_loss"] = getattr(self, "_last_floor_loss", 0.0)
         out["moe/restore_loss"] = getattr(self, "_last_restore", 0.0)
+        out["moe/ortho_loss"] = getattr(self, "_last_ortho", 0.0)
         out.update(self._cond_report)
         # min share across experts: one number that says "is anything dying?"
         shares = [v for k, v in out.items() if k.endswith("_share")]

@@ -63,7 +63,13 @@ class ContrastAttention(nn.Module):
         k, p = self.kernel, self.kernel // 2
         mu = F.avg_pool2d(ref, k, 1, p)
         var = (F.avg_pool2d(ref * ref, k, 1, p) - mu * mu).clamp_min(0)
-        sd = var.sqrt().mean(dim=1, keepdim=True)                   # (B,1,H,W)
+        # `+ eps` BEFORE the sqrt, never clamp-then-sqrt. d(sqrt)/dx is infinite
+        # at 0, and a flat patch makes var exactly 0, so `clamp_min(0).sqrt()`
+        # emits an infinite gradient. Multiplied by the zero-initialised output
+        # weight that becomes 0 * inf = NaN, which AMP's GradScaler then skips
+        # silently -- the model never updates and the loss sits flat at its
+        # initial value. That is precisely how design 3 failed for 10 epochs.
+        sd = (var + self.eps).sqrt().mean(dim=1, keepdim=True)      # (B,1,H,W)
         lo = sd.amin(dim=(2, 3), keepdim=True)
         hi = sd.amax(dim=(2, 3), keepdim=True)
         contrast = (sd - lo) / (hi - lo + self.eps)                 # per sample, [0,1]

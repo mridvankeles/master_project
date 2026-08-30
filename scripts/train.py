@@ -233,6 +233,7 @@ def main() -> int:
                     gate_count_lambda=cfg.gate.get("count_lambda", 0.0),
                     gate_floor_lambda=cfg.gate.get("floor_lambda", 0.0),
                     gate_floor_tau=cfg.gate.get("floor_tau", 0.6),
+                    gate_ortho_lambda=cfg.gate.get("ortho_lambda", 0.0),
                 )
                 mlflow.log_params({f"gate_{k}": v for k, v in cfg.gate.items()})
                 log.info("gate config: %s", cfg.gate)

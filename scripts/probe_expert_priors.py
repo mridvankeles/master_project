@@ -126,7 +126,7 @@ def main() -> int:
     var = F.avg_pool2d(x * x, 7, 1, 3) - mu * mu
     alts = {
         "divisive  x/mu": x / (mu + 1e-3),
-        "contrast (x-mu)/sd": (x - mu) / (var.clamp_min(1e-6).sqrt() + 1e-3),
+        "contrast (x-mu)/sd": (x - mu) / ((var + 1e-6).sqrt() + 1e-3),
         "highpass x-mu": x - mu,
     }
     for name, v in alts.items():

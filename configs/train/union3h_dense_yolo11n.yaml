@@ -1,0 +1,31 @@
+run_name: union3h_dense_yolo11n
+experiment: dior-hbb-full
+condition: union3b
+scope: full
+seed: 0
+model: configs/model/yolo11_dior_hbb.yaml
+scale: n
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 100
+  cos_lr: true
+  hsv_h: 0.015
+  hsv_s: 0.12
+  hsv_v: 0.15
+  mosaic: 0.0
+  scale: 0.5
+  translate: 0.1
+  fliplr: 0.5
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+subset:
+  train: 5862
+  val: 2000

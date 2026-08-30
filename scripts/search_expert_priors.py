@@ -87,7 +87,7 @@ def op_contrast(x, k, d):
     """(x-mu)/sd. Removes offset AND gain -- so it subsumes both, which is a risk."""
     m = _mu(x, k, d)
     v = (_mu(x * x, k, d) - m * m).clamp_min(0)
-    return (x - m) / (v.sqrt() + EPS)
+    return (x - m) / ((v + EPS * EPS).sqrt() + EPS)
 
 
 def op_log_sub(x, k, d):
