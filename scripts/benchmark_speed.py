@@ -44,16 +44,26 @@ from src.utils.paths import OUTPUT_DIR, ensure_dir  # noqa: E402
 log = get_logger("benchmark_speed")
 
 
-def module_gflops(mod: torch.nn.Module, shape: tuple[int, ...]) -> float:
-    """GFLOPs of one submodule at a given input shape, via thop."""
+def module_gflops(mod: torch.nn.Module, shape: tuple[int, ...],
+                  ctx_shape: tuple[int, ...] | None = None) -> float:
+    """GFLOPs of one submodule at a given input shape, via thop.
+
+    Design-3 experts take `(x, ctx)` -- the shared rich projection is fed into
+    each branch -- so a one-argument call fails on the concatenated 1x1.
+    `ctx_shape` supplies it when needed.
+    """
     try:
         import thop
     except ImportError:
         return float("nan")
-    x = torch.zeros(shape, device=next(mod.parameters()).device,
-                    dtype=next(mod.parameters()).dtype)
+    dev = next(mod.parameters()).device
+    dt = next(mod.parameters()).dtype
+    x = torch.zeros(shape, device=dev, dtype=dt)
+    args = (x,)
+    if ctx_shape is not None:
+        args = (x, torch.zeros(ctx_shape, device=dev, dtype=dt))
     with torch.no_grad():
-        macs, _ = thop.profile(mod, inputs=(x,), verbose=False)
+        macs, _ = thop.profile(mod, inputs=args, verbose=False)
     return macs * 2 / 1e9  # MACs -> FLOPs, and thop counts one image
 
 
@@ -149,7 +159,10 @@ def main() -> int:
             # Block input is P3: c1 channels at imgsz/8 square.
             side = args.imgsz // 8
             shape = (1, b.c1, side, side)
-            costs = [module_gflops(e, shape) for e in b.experts]
+            ctx_shape = ((1, b.c2, side, side)
+                         if getattr(b, "arch", "static") == "hetero"
+                         and getattr(b, "rich_proj", False) else None)
+            costs = [module_gflops(e, shape, ctx_shape) for e in b.experts]
             r["gflops_gate"] = module_gflops(b.gate, (1, b.c1))
             r["gflops_experts_all"] = float(sum(costs))
             r["gflops_experts_active"] = float(sum(c * float(rates[i])
