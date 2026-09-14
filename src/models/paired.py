@@ -47,8 +47,8 @@ from ultralytics.data.dataset import YOLODataset
 
 from src.models.moe2 import CONDITION_ALIASES
 
-__all__ = ["PairedYOLODataset", "restoration_loss", "scene_id", "condition_token",
-           "clear_twin_path", "attach_twins"]
+__all__ = ["PairedYOLODataset", "restoration_loss", "per_expert_restoration_loss",
+           "scene_id", "condition_token", "clear_twin_path", "attach_twins"]
 
 
 def _tokens(path) -> list[str]:
@@ -214,3 +214,61 @@ def restoration_loss(student: torch.Tensor, target: torch.Tensor,
     t = target[degraded].detach()
     scale = t.pow(2).mean().sqrt().clamp_min(1e-3)
     return F.smooth_l1_loss(s / scale, t / scale, beta=beta)
+
+
+def per_expert_restoration_loss(blk, target: torch.Tensor, cond: torch.Tensor,
+                                weights: dict[str, float], beta: float = 0.1):
+    """Make each expert INDIVIDUALLY responsible for its own condition's gap.
+
+    WHY THE BLOCK-LEVEL VERSION WAS NOT ENOUGH
+    ------------------------------------------
+    `restoration_loss` compares the whole block output against the clear twin:
+
+        L = SmoothL1( proj(x) + shared(x) + sum_i w_i e_i(x),  target )
+
+    The always-on path appears in that sum, so it can satisfy the objective on
+    the experts' behalf -- the same absorption that leaves them inert. Measured
+    on `cond3h`: forcing the plain `clear` branch gave the BEST restoration gain
+    on fog (+0.0172) and night (+0.0226) data, while the fog branch was the
+    worst (-0.0368). The loss was optimised; the intended expert never was.
+
+    THE PER-EXPERT FORM
+    -------------------
+    For expert k, take only the samples whose condition IS k, and ask that
+    branch alone to close the gap:
+
+        L_k = SmoothL1( base + w_k e_k(x),  target )     over rows where cond == k
+
+    `base` is detached inside this term is NOT desirable -- the bypass should
+    still be free to help -- but the expert is the only *conditional* term
+    present, so the gradient for closing the remaining gap has nowhere else to
+    go. That is the difference from the block-level version.
+
+    Weights are per expert so the fog encoder-decoder and the night branch can
+    be pushed at different strengths; `clear` defaults low, because on a clear
+    image the target IS the input and the term degenerates to "do no harm".
+    """
+    base = getattr(blk, "last_base", None)
+    if base is None or not blk.last_expert_out:
+        return 0.0, {}
+    total, logs = 0.0, {}
+    for i, kind in enumerate(blk.expert_kinds):
+        w = float(weights.get(kind, 0.0))
+        if w == 0.0:
+            continue
+        mask = blk.last_expert_mask.get(kind)
+        out_k = blk.last_expert_out.get(kind)
+        if mask is None or out_k is None:
+            continue
+        sel = mask & (cond == i)          # routed here AND actually this condition
+        if not sel.any():
+            continue
+        sub = sel[mask]                   # position within this expert's own rows
+        e = out_k[sub] * blk.last_weight[sel, i].view(-1, 1, 1, 1)
+        s = base[sel] + e
+        tt = target[sel].detach()
+        scale = tt.pow(2).mean().sqrt().clamp_min(1e-3)
+        loss_k = F.smooth_l1_loss(s / scale, tt / scale, beta=beta)
+        logs[kind] = float(loss_k.detach())
+        total = total + w * loss_k
+    return total, logs

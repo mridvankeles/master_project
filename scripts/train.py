@@ -234,6 +234,8 @@ def main() -> int:
                     gate_floor_lambda=cfg.gate.get("floor_lambda", 0.0),
                     gate_floor_tau=cfg.gate.get("floor_tau", 0.6),
                     gate_ortho_lambda=cfg.gate.get("ortho_lambda", 0.0),
+                    bypass_lambda=cfg.gate.get("bypass_lambda", 0.0),
+                    bypass_tau=cfg.gate.get("bypass_tau", 0.3),
                 )
                 mlflow.log_params({f"gate_{k}": v for k, v in cfg.gate.items()})
                 log.info("gate config: %s", cfg.gate)
@@ -241,6 +243,7 @@ def main() -> int:
                 train_args.update(
                     restore_lambda=cfg.restore.get("lambda", 0.0),
                     restore_beta=cfg.restore.get("beta", 0.1),
+                    restore_per_expert=cfg.restore.get("per_expert"),
                 )
                 mlflow.log_params({f"restore_{k}": v for k, v in cfg.restore.items()})
                 log.info("restoration config: %s", cfg.restore)

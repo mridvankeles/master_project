@@ -77,6 +77,14 @@ class MoEDetectionTrainer(DetectionTrainer):
         # always-on branch cannot absorb, which is why design 2's were inert.
         self.restore_lambda = float(overrides.pop("restore_lambda", 0.0))
         self.restore_beta = float(overrides.pop("restore_beta", 0.1))
+        # Per-expert reconstruction: each branch answers for its OWN condition,
+        # instead of the block sum that the always-on path also contributes to.
+        self.restore_per_expert = overrides.pop("restore_per_expert", None) or {}
+        # Charge the block when the always-on path explains nearly everything.
+        self.bypass_lambda = float(overrides.pop("bypass_lambda", 0.0))
+        self.bypass_tau = float(overrides.pop("bypass_tau", 0.3))
+        self._last_bypass = 0.0
+        self._last_per_expert: dict[str, float] = {}
         self._last_restore = 0.0
         self.nwd_levels = str(overrides.pop("nwd_levels", "all"))
         self.nwd_p3_weight = float(overrides.pop("nwd_p3_weight", 1.0))
@@ -104,7 +112,8 @@ class MoEDetectionTrainer(DetectionTrainer):
         )
         use_aux = self.moe_lambda != 0 and bool(blocks)
         gate_active = (self.gate_lambda or self.gate_floor_lambda
-                       or self.gate_ortho_lambda or self.restore_lambda) and cond_blocks
+                       or self.gate_ortho_lambda or self.restore_lambda
+                       or self.bypass_lambda or self.restore_per_expert) and cond_blocks
         if not use_aux and self.nwd_mode == "off" and not gate_active:
             LOGGER.warning("MoE trainer: neither auxiliary loss nor NWD is active")
             return model
@@ -150,7 +159,8 @@ class MoEDetectionTrainer(DetectionTrainer):
         which is how this was found).
         """
         if not model.training or (self.gate_lambda == 0 and self.gate_floor_lambda == 0
-                                  and self.gate_ortho_lambda == 0):
+                                  and self.gate_ortho_lambda == 0
+                                  and self.bypass_lambda == 0):
             return total
         from .moe2 import (cond_moe_blocks, condition_from_paths, expert_floor_loss,
                            gate_supervision_loss)
@@ -184,6 +194,13 @@ class MoEDetectionTrainer(DetectionTrainer):
             if isinstance(bce, torch.Tensor):
                 self._last_gate_loss = float(bce.detach())
                 term = term + self.gate_lambda * bce
+        if self.bypass_lambda:
+            from .moe2 import bypass_penalty
+
+            bp = bypass_penalty(model, tau=self.bypass_tau)
+            if isinstance(bp, torch.Tensor):
+                self._last_bypass = float(bp.detach())
+                term = term + self.bypass_lambda * bp
         if self.gate_ortho_lambda:
             from .moe2 import expert_orthogonality_loss
 
@@ -211,7 +228,7 @@ class MoEDetectionTrainer(DetectionTrainer):
         be taught to ignore it.
         """
         ds = super().build_dataset(img_path, mode, batch)
-        if self.restore_lambda == 0 or mode != "train":
+        if (self.restore_lambda == 0 and not self.restore_per_expert) or mode != "train":
             return ds
         from .paired import PairedYOLODataset
 
@@ -235,7 +252,7 @@ class MoEDetectionTrainer(DetectionTrainer):
         block's stashed routing state, so gate supervision and utilisation
         logging have to have finished first.
         """
-        if self.restore_lambda == 0 or not model.training:
+        if (self.restore_lambda == 0 and not self.restore_per_expert) or not model.training:
             return total
         from .moe2 import cond_moe_blocks
         from .paired import condition_token, restoration_loss
@@ -252,16 +269,43 @@ class MoEDetectionTrainer(DetectionTrainer):
         if degraded.shape[0] != student.shape[0] or not degraded.any():
             return total
 
+        # The twin forward runs the SAME block, so it overwrites every stash the
+        # per-expert term needs -- base, masks, per-branch outputs, weights. Snapshot
+        # the degraded-forward state first and put it back afterwards. The twin pass
+        # is under no_grad, so restoring these keeps the live graph intact.
+        snap = (blk.last_base, blk.last_weight,
+                dict(blk.last_expert_out), dict(blk.last_expert_mask))
         with torch.no_grad():
             model(twin.to(student.device, non_blocking=True).float() / 255)
             target = blk.last_out
+        blk.last_base, blk.last_weight, blk.last_expert_out, blk.last_expert_mask = snap
         if target is None or target.shape != student.shape:
             return total
 
-        loss = restoration_loss(student, target, degraded, beta=self.restore_beta)
-        if isinstance(loss, torch.Tensor):
-            self._last_restore = float(loss.detach())
-            term = self.restore_lambda * loss
+        term = 0.0
+        if self.restore_lambda:
+            loss = restoration_loss(student, target, degraded, beta=self.restore_beta)
+            if isinstance(loss, torch.Tensor):
+                self._last_restore = float(loss.detach())
+                term = term + self.restore_lambda * loss
+        if self.restore_per_expert:
+            from .moe2 import CONDITION_ORDER
+            from .paired import per_expert_restoration_loss
+
+            # Condition index per sample, -1 where unknown, so an expert is only
+            # asked about images that really are its condition.
+            idx = torch.full((len(paths),), -1, dtype=torch.long, device=student.device)
+            for n, f in enumerate(paths):
+                c = condition_token(f)
+                if c in CONDITION_ORDER:
+                    idx[n] = CONDITION_ORDER.index(c)
+            pe, logs = per_expert_restoration_loss(blk, target, idx,
+                                                   self.restore_per_expert,
+                                                   beta=self.restore_beta)
+            if isinstance(pe, torch.Tensor):
+                self._last_per_expert = logs
+                term = term + pe
+        if isinstance(term, torch.Tensor):
             if isinstance(total, torch.Tensor) and total.ndim > 0:
                 total = total.clone()
                 total[0] = total[0] + term
@@ -344,6 +388,9 @@ class MoEDetectionTrainer(DetectionTrainer):
         out["moe/floor_loss"] = getattr(self, "_last_floor_loss", 0.0)
         out["moe/restore_loss"] = getattr(self, "_last_restore", 0.0)
         out["moe/ortho_loss"] = getattr(self, "_last_ortho", 0.0)
+        out["moe/bypass_loss"] = getattr(self, "_last_bypass", 0.0)
+        for k, v in getattr(self, "_last_per_expert", {}).items():
+            out[f"moe/restore_{k}"] = v
         out.update(self._cond_report)
         # min share across experts: one number that says "is anything dying?"
         shares = [v for k, v in out.items() if k.endswith("_share")]

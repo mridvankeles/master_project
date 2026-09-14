@@ -1,0 +1,101 @@
+# DESIGN 3i — per-expert reconstruction losses + a penalty on the bypass.
+#
+# Three designs have now produced the same verdict from
+# `scripts/expert_intervention.py`: switching EVERY expert off changes mAP by
+# 0.001-0.002. The block is a residual, not a mixture --
+#
+#     out = proj(x) + shared(x) + sum_i w_i * expert_i(x)
+#           \_______ always competent _______/   \__ optional __/
+#
+# -- and optimisation leaves optional things small. Two changes here attack that
+# directly, and they are meant to be used together.
+#
+# 1. PER-EXPERT RECONSTRUCTION. `restore.lambda` compares the whole block output
+#    against the clear twin, and the always-on path is inside that sum, so it can
+#    satisfy the objective on the experts' behalf. Measured on cond3h: forcing the
+#    plain `clear` branch gave the BEST restoration gain on fog (+0.0172) and
+#    night (+0.0226) data, while the fog branch was the WORST (-0.0368). The loss
+#    was optimised; the intended expert never was.
+#
+#    `restore.per_expert` instead asks each branch about its own condition alone:
+#        L_k = SmoothL1( base + w_k e_k(x), target )   over rows where cond == k
+#    The fog encoder-decoder now has a reconstruction objective of its own, and
+#    so does the night branch.
+#
+# 2. BYPASS PENALTY. A hinge charging the block when the always-on path explains
+#    nearly all of the output:
+#        share = ||out - base|| / ||out||;   L = mean relu(tau - share)
+#
+#    CAVEAT, and it is why 1 and 2 ship together: this forces expert MAGNITUDE,
+#    not expert USEFULNESS. A model can satisfy it by inflating the experts and
+#    shrinking the bypass with no functional change at all. Only the per-expert
+#    reconstruction term constrains what that magnitude must CONTAIN.
+#
+# SUCCESS IS NOT mAP. In order:
+#   1. intervention spread > 0.01  (design 2 and 3 both gave 0.001-0.002)
+#   2. inspect_experts: fog branch wins on fog data, night on night
+#   3. expert_share rising and staying up
+#   4. mAP last, and inside a seed-noise floor still not measured
+
+run_name: cond3i_perexpert_yolo11n
+experiment: dior-hbb-full
+condition: union3b
+scope: full
+seed: 0
+
+model: configs/model/yolo11_dior_hbb_cond3h.yaml
+scale: n
+
+train:
+  epochs: 100
+  imgsz: 640
+  batch: 16
+  device: 0
+  workers: 8
+  optimizer: auto
+  patience: 100
+  cos_lr: true
+
+  # Bounded photometric augmentation: from the measured HSV channel means the
+  # conditions stay separated while hsv_v < 0.210 and hsv_s < 0.154.
+  hsv_h: 0.015
+  hsv_s: 0.12
+  hsv_v: 0.15
+  # Must stay 0 -- paired restoration needs the twin to get the same geometry.
+  mosaic: 0.0
+  scale: 0.5
+  translate: 0.1
+  fliplr: 0.5
+
+  pretrained: yolo11n.pt
+  val: true
+  plots: true
+  save_period: -1
+  deterministic: true
+
+subset:
+  train: 5862
+  val: 2000
+
+gate:
+  lambda: 1.0
+  floor_lambda: 0.5
+  floor_tau: 0.6
+  count_lambda: 0.0
+  pos_weight: 1.0
+  # The experts must carry at least 30% of the block output's magnitude.
+  bypass_lambda: 0.5
+  bypass_tau: 0.3
+
+restore:
+  # Block-level term kept but halved: the per-expert terms now carry the load,
+  # and leaving this at 1.0 would let the bypass keep answering for everyone.
+  lambda: 0.5
+  beta: 0.1
+  per_expert:
+    # `clear` low on purpose: on a clear image the target IS the input, so the
+    # term degenerates to "do no harm" and a large weight would only teach that
+    # branch to be an identity map.
+    clear: 0.1
+    fog: 1.0
+    night: 1.0

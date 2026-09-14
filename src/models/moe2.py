@@ -37,7 +37,7 @@ from .experts import StaticExpert
 
 __all__ = ["CondMoEBlock", "gate_supervision_loss", "routing_cost",
            "expert_floor_loss", "expert_orthogonality_loss",
-           "condition_from_paths"]
+           "bypass_penalty", "condition_from_paths"]
 
 # Order is load-bearing: it fixes which output unit means which condition, and
 # the supervision target is built from it.
@@ -154,6 +154,9 @@ class CondMoEBlock(nn.Module):
         self.last_active: torch.Tensor | None = None   # clean activation mask
         self.last_index: torch.Tensor | None = None    # clean argmax, for reporting
         self.last_out: torch.Tensor | None = None      # block output, for restoration
+        self.last_base: torch.Tensor | None = None     # always-on path alone
+        self.last_weight: torch.Tensor | None = None   # per-expert mixing weight
+        self.last_expert_mask: dict[str, torch.Tensor] = {}
         self.last_expert_out: dict[str, torch.Tensor] = {}  # per-branch, for inspection
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -179,11 +182,10 @@ class CondMoEBlock(nn.Module):
         self.last_active = (probs > self.threshold).float()
 
         ctx = self.proj(x)
-        out = ctx
+        base = ctx
         if self.shared is not None:
             sh = self.shared(x) if self.arch != "hetero" else self.shared(x, None)
-            out = out + sh
-            self.last_expert_out["shared"] = sh
+            base = base + sh
 
         # Straight-through: the branch runs at full strength when selected, but
         # the gate still receives gradient through p. Design 2 multiplied the
@@ -191,15 +193,25 @@ class CondMoEBlock(nn.Module):
         # reach full strength if the gate was fully confident, and BCE caps that.
         weight = probs + (active - probs).detach() if self.hard_mask else probs
 
+        # `last_base` is the ALWAYS-ON path on its own. Stashing it is what lets
+        # a loss address one expert individually, instead of the block sum that
+        # the bypass also contributes to -- the absorption that made design 2
+        # and design 3 inert.
+        self.last_base = base
+        self.last_weight = weight
         self.last_expert_out = {}
+        self.last_expert_mask = {}
+
+        out = base
         for i, expert in enumerate(self.experts):
             mask = active[:, i] > 0
             if mask.any():
                 xi = x[mask]
                 ei = expert(xi, ctx[mask]) if self.arch == "hetero" else expert(xi)
-                # Stashed for the orthogonality term and for inspection. Only the
-                # rows that actually ran, so pairs are compared on shared samples.
+                # Only the rows that actually ran, plus the mask that says which,
+                # so a per-expert loss can line them back up with the batch.
                 self.last_expert_out[self.expert_kinds[i]] = ei
+                self.last_expert_mask[self.expert_kinds[i]] = mask
                 contribution = ei * weight[mask, i].view(-1, 1, 1, 1)
                 out = out.index_add(
                     0, mask.nonzero(as_tuple=True)[0], contribution.to(out.dtype)
@@ -392,6 +404,50 @@ def expert_orthogonality_loss(model: nn.Module) -> torch.Tensor | float:
     return total / n if n else 0.0
 
 
+def bypass_penalty(model: nn.Module, tau: float = 0.3) -> torch.Tensor | float:
+    r"""Charge the block when the ALWAYS-ON path explains nearly all of the output.
+
+    THE PROBLEM
+    -----------
+    The block is a residual, not a mixture:
+
+        out = proj(x) + shared(x) + sum_i w_i * expert_i(x)
+              \________ always competent ________/   \__ optional __/
+
+    The always-on path alone minimises the detection loss, so everything added to
+    it is optional by construction, and optimisation leaves optional things
+    small. Measured across three designs: expert output RMS is 10-21% of the
+    bypass, and switching every expert off costs 0.001-0.002 mAP.
+
+    THE TERM
+    --------
+        share   = || out - base || / || out ||          per image
+        L_bypass = mean relu( tau - share )
+
+    A hinge, so it stops pulling once the experts carry `tau` of the output and
+    never fights the detection loss beyond that.
+
+    A CAVEAT THAT MUST TRAVEL WITH THIS TERM
+    ----------------------------------------
+    It forces expert MAGNITUDE, not expert USEFULNESS. A model can satisfy it by
+    inflating the experts and shrinking the bypass with no functional change at
+    all -- the ratio moves, the prediction does not. So it is only meaningful
+    next to a term that constrains what the experts must *contain*, which is
+    what the per-expert reconstruction losses do. Used alone it will produce a
+    healthy-looking share and a flat intervention.
+    """
+    blocks = cond_moe_blocks(model)
+    total, n = 0.0, 0
+    for b in blocks:
+        if b.last_base is None or b.last_out is None:
+            continue
+        e = (b.last_out - b.last_base).flatten(1).norm(dim=1)
+        o = b.last_out.flatten(1).norm(dim=1).clamp_min(1e-6)
+        total = total + torch.relu(tau - e / o).mean()
+        n += 1
+    return total / n if n else 0.0
+
+
 def routing_report(model: nn.Module) -> dict[str, float]:
     """Clean per-expert activation rates plus mean gate confidence."""
     out: dict[str, float] = {}
@@ -405,6 +461,11 @@ def routing_report(model: nn.Module) -> dict[str, float]:
         # The number the expert floor exists to drive to zero: images that
         # reached no specialist and were carried by the shared branch alone.
         out[f"moe{b_i}/shortcut_only"] = float((act.sum(1) == 0).float().mean())
+        if block.last_base is not None and block.last_out is not None:
+            e = (block.last_out - block.last_base).flatten(1).norm(dim=1)
+            o = block.last_out.flatten(1).norm(dim=1).clamp_min(1e-6)
+            # The share of the block output the experts actually carry.
+            out[f"moe{b_i}/expert_share"] = float((e / o).mean())
         if block.last_gate is not None:
             # Expected count is threshold-free: it shows whether the gate is
             # confident, independently of where the cut is placed.
