@@ -1,0 +1,63 @@
+# DESIGN 3i, NO SHARED BRANCH — the always-on expert is removed entirely.
+#
+# The diagnosis across three designs is that the block is a residual, not a
+# mixture: an always-competent bypass makes every expert optional, and
+# optimisation leaves optional things small. `shared=False` deletes half that
+# bypass, so the routed branches have to carry the function rather than correct
+# something that already works.
+#
+# What remains always-on is `proj` (RichProj: 3x3+BN+SiLU then 1x1). It cannot
+# be removed -- it is what maps 256 channels to 64 -- so this is a partial, not
+# total, removal of the bypass. If the intervention is STILL flat afterwards,
+# that residual projection is the next suspect and the honest conclusion is that
+# a residual MoE at the neck cannot be made to matter at this scale.
+#
+# Everything else is identical to `yolo11_dior_hbb_cond3h.yaml`, so this is a
+# one-variable ablation against `cond3i_perexpert_yolo11n`.
+
+# Parameters
+nc: 20 # DIOR classes — order fixed by src/data/dior_classes.py
+scales: # `model=yolo11n.yaml` selects scale 'n'
+  # [depth, width, max_channels]
+  n: [0.50, 0.25, 1024] # 181 layers, 2624080 parameters, 6.6 GFLOPs
+  s: [0.50, 0.50, 1024] # 181 layers, 9458752 parameters, 21.7 GFLOPs
+  m: [0.50, 1.00, 512] # 231 layers, 20114688 parameters, 68.5 GFLOPs
+  l: [1.00, 1.00, 512] # 357 layers, 25372160 parameters, 87.6 GFLOPs
+  x: [1.00, 1.50, 512] # 357 layers, 56966176 parameters, 196.0 GFLOPs
+
+# backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 2, C3k2, [256, False, 0.25]]
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 2, C3k2, [512, False, 0.25]]
+  - [-1, 1, Conv, [512, 3, 2]] # 5-P4/16
+  - [-1, 2, C3k2, [512, True]]
+  - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
+  - [-1, 2, C3k2, [1024, True]]
+  - [-1, 1, SPPF, [1024, 5]] # 9
+  - [-1, 2, C2PSA, [1024]] # 10  <-- candidate MoE insertion point (deepest backbone stage)
+
+# head
+head:
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 6], 1, Concat, [1]] # cat backbone P4
+  - [-1, 2, C3k2, [512, False]] # 13
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [[-1, 4], 1, Concat, [1]] # cat backbone P3
+  # args: c2, experts, shared, noise_std, threshold, top1, bottleneck,
+  #       arch, hard_mask, rich_proj, init_gain
+  - [-1, 1, CondMoEBlock, [256, ['clear','fog','night'], False, 0.5, 0.5, False, 0.5, 'hetero', True, True, 0.1]] # 16 (P3/8-small)
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 13], 1, Concat, [1]] # cat head P4
+  - [-1, 2, C3k2, [512, False]] # 19 (P4/16-medium)
+
+  - [-1, 1, Conv, [512, 3, 2]]
+  - [[-1, 10], 1, Concat, [1]] # cat head P5
+  - [-1, 2, C3k2, [1024, True]] # 22 (P5/32-large)
+
+  - [[16, 19, 22], 1, Detect, [nc]] # Detect(P3, P4, P5)
