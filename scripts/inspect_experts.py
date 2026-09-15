@@ -114,8 +114,16 @@ def main() -> int:
             # Clear images route to the clear branch 73% of the time, so that
             # target was missing a term the experts are trained to reproduce,
             # and it reported a spuriously negative gain.
+            # `shared` is None in the no-shared ablation, where the always-on
+            # path is `proj` alone.
+            def always_on(f):
+                base = blk.proj(f)
+                if blk.shared is not None:
+                    base = base + (blk.shared(f, None) if hetero else blk.shared(f))
+                return base
+
             ctx_c = blk.proj(f_cl)
-            target = ctx_c + (blk.shared(f_cl, None) if hetero else blk.shared(f_cl))
+            target = always_on(f_cl)
             p_c = blk.gate(f_cl.mean((2, 3))).sigmoid()
             a_c = (p_c > blk.threshold).float()
             w_c = a_c if getattr(blk, "hard_mask", False) else p_c
@@ -124,7 +132,7 @@ def main() -> int:
                 target = target + ec * (w_c[:, e_i] * a_c[:, e_i]).view(-1, 1, 1, 1)
 
             ctx = blk.proj(f_deg)
-            base = ctx + (blk.shared(f_deg, None) if hetero else blk.shared(f_deg))
+            base = always_on(f_deg)
             gap_before = (base - target).flatten(1).norm(dim=1)
 
             probs = blk.gate(f_deg.mean((2, 3))).sigmoid()
